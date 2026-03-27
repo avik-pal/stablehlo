@@ -17,6 +17,11 @@ include "mlir/Dialect/Shape/IR/ShapeOps.td"
 ///////////
 //// Op & Type Constraints
 
+class AllDimSizeEquals<int dimSize> : Constraint<
+    CPred<"llvm::all_of($1.asArrayRef(), [&](int64_t dim) { "
+          "return llvm::cast<ShapedType>($0.getType()).getDimSize(dim) == " # dimSize # "; })">,
+    "all dimensions sizes in dim are " # dimSize>;
+
 class DimSizeEquals<int dimSize> : Constraint<
     CPred<"llvm::cast<ShapedType>($0.getType()).getDimSize($1.getInt()) == " # dimSize>,
     "dim size is " # dimSize>;
@@ -64,10 +69,15 @@ def TensorDimsAllOne : Constraint<CPred<"tensorDimsAllOne($0, $1)">, "all tensor
 
 def TypesEqual : Constraint<CPred<"$0.getType() == $1.getType()">, "operands are equal">;
 
+def ZeroElement : Constraint<CPred<"llvm::cast<ShapedType>($0.getType()).getNumElements() == 0">, "operand has 0 elements">;
+
 ///////////
 //// Attribute Constraints
 
-def AnySplat : AttrConstraint<CPred<"$_self.isSplat()">, "is any splat">;
+def ElementsAttrSplat : AttrConstraint<
+    CPred<"llvm::isa<mlir::ElementsAttr>($_self) && "
+          "llvm::cast<mlir::ElementsAttr>($_self).isSplat()">,
+    "is any splat elements attribute">;
 
 def AnyZero : AttrConstraint<
     CPred<"::mlir::matchPattern($_self, m_AnyAttrOf(m_Zero(), m_AnyZeroFloat()))">,
@@ -181,14 +191,39 @@ def AndOp_CanonicalizeConstantToRhs
 // Pattern: and(X, 0) -> 0
 def AndOp_FoldToZero
   : Pat<(StableHLO_AndOp:$op $lhs, (StableHLO_ConstantOp:$zero IntZero:$value)),
-        (replaceWithValue $zero), [],
-        [(MergeDiscardableAttributes $op, $zero)]>;
+        (replaceWithValue $zero)>;
 
 // Pattern: and(X, 1) -> X
 def AndOp_RemoveNoop
   : Pat<(StableHLO_AndOp:$op $lhs, (StableHLO_ConstantOp:$one IntAllOnes:$value)),
         (replaceWithValue $lhs), [],
         [(MergeDiscardableAttributes $op, $lhs)]>;
+
+////////
+// ReverseOp
+
+// Pattern: reverse(X, dims=[]) -> X
+def ReverseOp_EmptyDim
+  : Pat<(StableHLO_ReverseOp $operands, EmptyI64Array:$dims),
+        (replaceWithValue $operands)>;
+
+// Pattern: reverse(X, dims=[...]) -> X [if X has 0 element]
+def ReverseOp_ZeroElements
+  : Pat<(StableHLO_ReverseOp AnyStaticShapeTensor:$operands, $dims),
+        (replaceWithValue $operands),
+        [(ZeroElement $operands)]>;
+
+// Pattern: reverse(X, dims=[...]) -> X [size of dim in X equals 1]
+def ReverseOp_AllDimsEqualOne
+  : Pat<(StableHLO_ReverseOp AnyStaticShapeTensor:$operands, $dims),
+        (replaceWithValue $operands),
+        [(AllDimSizeEquals<1> $operands, $dims)]>;
+
+
+// Pattern: reverse(X, dims=[...]) -> X
+def ReverseOp_SplatToNoop
+  : Pat<(StableHLO_ReverseOp:$op (StableHLO_ConstantOp:$cst ElementsAttrSplat:$value), $dims),
+        (replaceWithValue $cst)>;
 
 ////////
 // BroadcastInDimOp
@@ -207,9 +242,10 @@ def BroadcastInDimOp_MergeComposition
   : Pat<(StableHLO_BroadcastInDimOp:$outer_op
             (StableHLO_BroadcastInDimOp:$inner_op $operand, $inner_dims),
             $outer_dims),
-        (StableHLO_BroadcastInDimOp
+        (StableHLO_BroadcastInDimOp:$new_op
             $operand, (MergeBroadcastDims $outer_dims, $inner_dims)),
-        [(BroadcastNotReducibleToReshape $inner_op, $operand)]>;
+        [(BroadcastNotReducibleToReshape $inner_op, $operand)],
+        [(MergeDiscardableAttributes $outer_op, $new_op)]>;
 
 // Pattern: broadcast_in_dim(X, [sorted...]) -> reshape(X, [sorted...])
 //          [if same numel]
@@ -217,17 +253,18 @@ def BroadcastInDimOp_MergeComposition
 // for bounded dynamism, same for BroadcastInDimOp_ReplaceWithReshape
 def BroadcastInDimOp_ReplaceWithReshape
   : Pat<(StableHLO_BroadcastInDimOp:$op AnyStaticShapeTensor:$operand, SortedDims:$dims),
-        (StableHLO_ReshapeOpWithShape $op, $operand),
+        (StableHLO_ReshapeOpWithShape:$new_op $op, $operand),
         [(NumberOfElementsEqual $op, $operand)],
-        [],
+        [(MergeDiscardableAttributes $op, $new_op)],
         (addBenefit 1)>;
 
 // Pattern: broadcast_in_dim(X, [dims...]) -> transpose(X, [dims...])
 //          [if same numel & rank]
 def BroadcastInDimOp_ReplaceWithTranspose
   : Pat<(StableHLO_BroadcastInDimOp:$op AnyStaticShapeTensor:$operand, $dims),
-        (StableHLO_TransposeOp $operand, (InvertBroadcastDims $dims)),
-        [(NumberOfElementsEqual $op, $operand), (RankEqual $op, $operand)]>;
+        (StableHLO_TransposeOp:$new_op $operand, (InvertBroadcastDims $dims)),
+        [(NumberOfElementsEqual $op, $operand), (RankEqual $op, $operand)],
+        [(MergeDiscardableAttributes $op, $new_op)]>;
 
 ////////
 // CompareOp
@@ -279,19 +316,20 @@ def ConvertOp_RemoveNoop
 // TODO: Think more about whether the values of known_expanding_dimensions and
 //       known_non_expanding_dimensions can be preserved.
 def DynamicBroadcastInDimOp_MergeComposition
-  : Pat<(StableHLO_DynamicBroadcastInDimOp
+  : Pat<(StableHLO_DynamicBroadcastInDimOp:$outer_op
             (StableHLO_DynamicBroadcastInDimOp
                 $operand, $shape_p, $dims_p, $expanding_p, $nonexpanding_p),
             $shape,
             $dims,
             $expanding,
             $nonexpanding),
-        (StableHLO_DynamicBroadcastInDimOp
+        (StableHLO_DynamicBroadcastInDimOp:$new_op
             $operand,
             $shape,
             (MergeBroadcastDims $dims, $dims_p),
             (GetEmptyI64Array),
-            (GetEmptyI64Array))>;
+            (GetEmptyI64Array)), [],
+        [(MergeDiscardableAttributes $outer_op, $new_op)]>;
 
 // Pattern: dynamic_broadcast_in_dim(X, _, _, [all_nonexpanding...])
 //       -> convert(X)
@@ -302,49 +340,53 @@ def DynamicBroadcastInDimOp_MergeComposition
 def DynamicBroadcastInDimOp_ReplaceNoopWithConvert
   : Pat<(StableHLO_DynamicBroadcastInDimOp:$op
             $operand, $shape, IotaDims:$dims, $expanding, $nonexpanding),
-        (StableHLO_ConvertOpWithShape $op, $operand),
-        [(AllDimsNonExpanding $nonexpanding, $op)]>;
+        (StableHLO_ConvertOpWithShape:$new_op $op, $operand),
+        [(AllDimsNonExpanding $nonexpanding, $op)],
+        [(MergeDiscardableAttributes $op, $new_op)]>;
 
 // Pattern: dynamic_broadcast_in_dim(dynamic_reshape(X, shape), shape)
 //       -> dynamic_reshape(X, shape)
 //
 // If sharing same shape operand, is dynamic reshape.
 def DynamicBroadcastInDimOp_FoldToDynamicReshape
-  : Pat<(StableHLO_DynamicBroadcastInDimOp
+  : Pat<(StableHLO_DynamicBroadcastInDimOp:$op
             (StableHLO_DynamicReshapeOp $operand, $shape),
             $shape,
             IotaDims:$dims,
             $expanding,
             $nonexpanding),
-        (StableHLO_DynamicReshapeOp $operand, $shape)>;
+        (StableHLO_DynamicReshapeOp:$new_op $operand, $shape), [],
+        [(MergeDiscardableAttributes $op, $new_op)]>;
 
 // Pattern: dynamic_broadcast_in_dim(X, shape_of(X)) -> X
 def DynamicBroadcastInDimOp_RemoveNoop
-  : Pat<(StableHLO_DynamicBroadcastInDimOp
+  : Pat<(StableHLO_DynamicBroadcastInDimOp:$op
             $operand,
             (Shape_ShapeOfOp $operand),
             IotaDims:$dims,
             $expanding,
             $nonexpanding),
-        (replaceWithValue $operand)>;
+        (replaceWithValue $operand), [],
+        [(MergeDiscardableAttributes $op, $operand)]>;
 
 ////////
 // DynamicGatherOp
 
 // Pattern: dynamic_gather(x, constant(slice_sizes)) -> gather(x, slice_sizes)
 def DynamicGatherOp_ReplaceWithGather
-  : Pat<(StableHLO_DynamicGatherOp
+  : Pat<(StableHLO_DynamicGatherOp:$op
             $operand,
             $start_indices,
             (StableHLO_ConstantOp DenseIntElementsAttr:$slice_sizes),
             $dimension_numbers,
             $indices_are_sorted),
-        (StableHLO_GatherOp
+        (StableHLO_GatherOp:$new_op
             $operand,
             $start_indices,
             $dimension_numbers,
             (ConvertToI64Array $slice_sizes),
-            $indices_are_sorted)>;
+            $indices_are_sorted), [],
+        [(MergeDiscardableAttributes $op, $new_op)]>;
 
 ////////
 // DynamicPadOp
@@ -352,18 +394,19 @@ def DynamicGatherOp_ReplaceWithGather
 // Pattern: dynamic_pad(X, low, high, interior) -> pad(X, low, high, interior)
 //          [if low, high, interior are all constants]
 def DynamicPadOp_ReplaceWithPad
-  : Pat<(StableHLO_DynamicPadOp
+  : Pat<(StableHLO_DynamicPadOp:$op
             $input,
             $padding_value,
             (ConstantLikeMatcher AnyIntElementsAttr:$edge_padding_low),
             (ConstantLikeMatcher AnyIntElementsAttr:$edge_padding_high),
             (ConstantLikeMatcher AnyIntElementsAttr:$interior_padding)),
-        (StableHLO_PadOp
+        (StableHLO_PadOp:$new_op
             $input,
             $padding_value,
             (ConvertToI64Array $edge_padding_low),
             (ConvertToI64Array $edge_padding_high),
-            (ConvertToI64Array $interior_padding))>;
+            (ConvertToI64Array $interior_padding)), [],
+        [(MergeDiscardableAttributes $op, $new_op)]>;
 
 ////////
 // DynamicReshapeOp
@@ -371,33 +414,37 @@ def DynamicPadOp_ReplaceWithPad
 // Pattern: dynamic_reshape(dynamic_reshape(X, _), shape))
 //       -> dynamic_reshape(X, shape)
 def DynamicReshapeOp_MergeComposition
-  : Pat<(StableHLO_DynamicReshapeOp
+  : Pat<(StableHLO_DynamicReshapeOp:$op
             (StableHLO_DynamicReshapeOp $operand, $shape_p), $shape),
-        (StableHLO_DynamicReshapeOp $operand, $shape)>;
+        (StableHLO_DynamicReshapeOp:$new_op $operand, $shape), [],
+        [(MergeDiscardableAttributes $op, $new_op)]>;
 
 // Pattern: shape_of(dynamic_reshape(X, shape)) -> shape
 def DynamicReshapeOp_FoldComposedOpsToShapeOperand
   : Pat<(Shape_ShapeOfOp:$op (StableHLO_DynamicReshapeOp $x, $shape)),
         (replaceWithValue $shape),
-        [(TypesEqual $shape, $op)]>;
+        [(TypesEqual $shape, $op)],
+        [(MergeDiscardableAttributes $op, $shape)]>;
 
 ////////
 // DynamicUpdateSliceOp
 
 // Pattern: dynamic_update_slice(X, update : zero_extent)) -> X
 def DynamicUpdateSliceOp_RemoveNoop
-  : Pat<(StableHLO_DynamicUpdateSliceOp
+  : Pat<(StableHLO_DynamicUpdateSliceOp:$op
             $operand, (ConstantLikeMatcher ZeroExtent:$update), $start_indices),
-        (replaceWithValue $operand)>;
+        (replaceWithValue $operand), [],
+        [(MergeDiscardableAttributes $op, $operand)]>;
 
 // Pattern: dynamic_update_slice(X, update, start_indices : zero)) -> update
 def DynamicUpdateSliceOp_FoldToUpdateOperand
-  : Pat<(StableHLO_DynamicUpdateSliceOp
+  : Pat<(StableHLO_DynamicUpdateSliceOp:$op
             AnyStaticShapeTensor:$operand,
             AnyStaticShapeTensor:$update,
             $start_indices),
         (replaceWithValue $update),
-        [(TypesEqual $operand, $update), (AllZero $start_indices)]>;
+        [(TypesEqual $operand, $update), (AllZero $start_indices)],
+        [(MergeDiscardableAttributes $op, $update)]>;
 
 
 ////////
@@ -537,13 +584,15 @@ def ReduceOp_RemoveNoop
 // Pattern: reshape(reshape(X, _), [shape]) -> reshape(X, [shape])
 def ReshapeOp_MergeComposition
   : Pat<(StableHLO_ReshapeOp:$reshape (StableHLO_ReshapeOp $operand)),
-        (StableHLO_ReshapeOpWithShape $reshape, $operand)>;
+        (StableHLO_ReshapeOpWithShape:$new_op $reshape, $operand), [],
+        [(MergeDiscardableAttributes $reshape, $new_op)]>;
 
 // Pattern: reshape(X, [X.shape]) -> X
 def ReshapeOp_RemoveNoop
   : Pat<(StableHLO_ReshapeOp:$reshape $operand),
         (replaceWithValue $operand),
-        [(TypesEqual $reshape, $operand)]>;
+        [(TypesEqual $reshape, $operand)],
+        [(MergeDiscardableAttributes $reshape, $operand)]>;
 
 
 ////////
@@ -551,8 +600,9 @@ def ReshapeOp_RemoveNoop
 
 // Pattern: select(not(p), t, f) -> select(p, f, t)
 def SelectOp_InvertPredicateAndSwap
-  : Pat<(StableHLO_SelectOp (StableHLO_NotOp $pred), $on_true, $on_false),
-        (StableHLO_SelectOp $pred, $on_false, $on_true)>;
+  : Pat<(StableHLO_SelectOp:$op (StableHLO_NotOp $pred), $on_true, $on_false),
+        (StableHLO_SelectOp:$new_op $pred, $on_false, $on_true), [],
+        [(MergeDiscardableAttributes $op, $new_op)]>;
 
 // Pattern: select(broadcast(not(p)), t, f) -> select(broadcast(p), f, t)
 def SelectOp_InvertBroadcastPredicateAndSwap
@@ -596,21 +646,24 @@ def SliceOp_RemoveNoop
             $limit_indices,
             $strides),
         (replaceWithValue $operand),
-        [(TypesEqual $operand, $op)]>;
+        [(TypesEqual $operand, $op)],
+        [(MergeDiscardableAttributes $op, $operand)]>;
 
 ////////
 // TransposeOp
 
 // Pattern: transpose(X, [iota...]) -> X
 def TransposeOp_RemoveNoop
-  : Pat<(StableHLO_TransposeOp $lhs, IotaDims:$dims),
-        (replaceWithValue $lhs)>;
+  : Pat<(StableHLO_TransposeOp:$op $lhs, IotaDims:$dims),
+        (replaceWithValue $lhs), [],
+        [(MergeDiscardableAttributes $op, $lhs)]>;
 
 // Pattern: transpose(transpose(X)) -> transpose(X)
 def TransposeOp_TransposeOfTranspose
-  : Pat<(StableHLO_TransposeOp
+  : Pat<(StableHLO_TransposeOp:$op
           (StableHLO_TransposeOp $child, $child_dims), $dims),
-        (StableHLO_TransposeOp $child, (MergePermutations $child_dims, $dims))>;
+        (StableHLO_TransposeOp:$new_op $child, (MergePermutations $child_dims, $dims)), [],
+        [(MergeDiscardableAttributes $op, $new_op)]>;
 
 ////////
 // GetTupleElementOp

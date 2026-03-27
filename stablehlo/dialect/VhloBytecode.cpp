@@ -16,6 +16,7 @@ limitations under the License.
 #include "stablehlo/dialect/VhloBytecode.h"
 
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 
@@ -26,6 +27,7 @@ limitations under the License.
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Bytecode/BytecodeImplementation.h"
 #include "mlir/IR/Attributes.h"
@@ -201,7 +203,7 @@ enum AttributeCode {
 /// location is updated.
 enum TypeCode {
   // TO ADD TYPE: Add an enum value with doc string for new type.
-  // Next available code: 42
+  // Next available code: 43
 
   ///   BooleanV1Type {
   ///   }
@@ -395,6 +397,11 @@ enum TypeCode {
   /// NoneV1Type {
   /// }
   kNoneV1Type = 33,
+
+  ///   FutureV1Type {
+  ///     elementType: Type
+  ///   }
+  kFutureV1Type = 42,
 };
 
 }  // namespace vhlo_encoding
@@ -497,6 +504,7 @@ class VhloBytecodeInterface : public BytecodeDialectInterface {
   RankedTensorV1Type readRankedTensorV1Type(DialectBytecodeReader& reader,
                                             bool hasEncoding) const;
   TokenV1Type readTokenV1Type(DialectBytecodeReader& reader) const;
+  FutureV1Type readFutureV1Type(DialectBytecodeReader& reader) const;
   TupleV1Type readTupleV1Type(DialectBytecodeReader& reader) const;
   UniformQuantizedPerAxisV1Type readUniformQuantizedPerAxisV1Type(
       DialectBytecodeReader& reader) const;
@@ -513,6 +521,7 @@ class VhloBytecodeInterface : public BytecodeDialectInterface {
   void write(FunctionV1Type type, DialectBytecodeWriter& writer) const;
   void write(RankedTensorV1Type type, DialectBytecodeWriter& writer) const;
   void write(TokenV1Type type, DialectBytecodeWriter& writer) const;
+  void write(FutureV1Type type, DialectBytecodeWriter& writer) const;
   void write(TupleV1Type type, DialectBytecodeWriter& writer) const;
   void write(UniformQuantizedPerAxisV1Type type,
              DialectBytecodeWriter& writer) const;
@@ -933,12 +942,93 @@ void VhloBytecodeInterface::write(StringV1Attr attr,
 // TensorV1Attr
 //===----------------------------------------------------------------------===//
 
+namespace {
+
+bool isBooleanType(Type type) {
+  auto tensorType = dyn_cast<RankedTensorV1Type>(type);
+  return tensorType && isa<BooleanV1Type>(tensorType.getElementType());
+}
+
+static LogicalResult readVhloTensorV1Attr(DialectBytecodeReader& reader,
+                                          Type type,
+                                          SmallVectorImpl<char>& rawData) {
+  ArrayRef<char> blob;
+  if (failed(reader.readBlob(blob))) return failure();
+
+  // If the type is not i1, just copy the blob.
+
+  if (!isBooleanType(type)) {
+    rawData.append(blob.begin(), blob.end());
+    return success();
+  }
+
+  // Check to see if this is using the packed format.
+  // Note: this could be asserted instead as this should be the case. But we
+  // did have period where the unpacked was being serialized, this enables
+  // consuming those still and the check for which case we are in is pretty
+  // cheap.
+  size_t numElements = cast<RankedTensorV1Type>(type).getNumElements();
+  size_t packedSize = llvm::divideCeil(numElements, 8);
+
+  // Unpack splats to single element 0x01 to match unpacked splat format.
+  if (blob.size() == 1 && blob[0] == (char)~0x00) {
+    rawData.resize(1);
+    rawData[0] = 0x01;
+    return success();
+  }
+  // Unpack the blob if it's packed.
+  // splat and blob.size() == packedSize for all N<=8 elements are ambiguous,
+  // non 0xFF means not splat so must be unpacked.
+  if (blob.size() == packedSize && blob.size() != numElements) {
+    // Unpack the blob.
+    rawData.resize(numElements);
+    for (size_t i = 0; i < numElements; ++i)
+      rawData[i] = (blob[i / 8] & (1 << (i % 8))) ? 1 : 0;
+    return success();
+  }
+  // Otherwise, fallback to the default behavior.
+  rawData.append(blob.begin(), blob.end());
+  return success();
+}
+
+static void writeVhloTensorV1Attr(DialectBytecodeWriter& writer,
+                                  vhlo::TensorV1Attr attr) {
+  if (!isBooleanType(attr.getType())) {
+    writer.writeOwnedBlob(attr.getData());
+    return;
+  }
+
+  // Pack the data if i1
+  SmallVector<char> data;
+  ArrayRef<char> rawData = attr.getData();
+  auto numElements = cast<RankedTensorV1Type>(attr.getType()).getNumElements();
+
+  // If the attribute is a splat, we can just splat the value directly.
+  // Use 0xFF to avoid ambiguity with packed format of <=8 elements.
+  bool isSplat = rawData.size() == 1 && numElements > 1;
+  if (isSplat) {
+    data.resize(1);
+    data[0] = rawData[0] ? (char)~0x00 : 0x00;
+    writer.writeUnownedBlob(data);
+    return;
+  }
+
+  data.resize(llvm::divideCeil(numElements, 8));
+  // Otherwise, pack the data manually.
+  for (int64_t i = 0; i < numElements; ++i)
+    if (rawData[i]) data[i / 8] |= (1 << (i % 8));
+  writer.writeUnownedBlob(data);
+}
+
+}  // namespace
+
 TensorV1Attr VhloBytecodeInterface::readTensorV1Attr(
     DialectBytecodeReader& reader) const {
   LOG_READ_CALL;
   Type type;
-  ArrayRef<char> blob;
-  if (failed(reader.readType(type)) || failed(reader.readBlob(blob)))
+  SmallVector<char> blob;
+  if (failed(reader.readType(type)) ||
+      failed(readVhloTensorV1Attr(reader, type, blob)))
     return TensorV1Attr();
   return TensorV1Attr::get(getContext(), type, blob);
 }
@@ -947,7 +1037,7 @@ void VhloBytecodeInterface::write(TensorV1Attr attr,
                                   DialectBytecodeWriter& writer) const {
   writer.writeVarInt(vhlo_encoding::kTensorV1Attr);
   writer.writeType(attr.getType());
-  writer.writeOwnedBlob(attr.getData());
+  writeVhloTensorV1Attr(writer, attr);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1087,6 +1177,8 @@ Type VhloBytecodeInterface::readType(DialectBytecodeReader& reader) const {
       return readRankedTensorV1Type(reader, /*hasEncoding=*/true);
     case vhlo_encoding::kTokenV1Type:
       return readTokenV1Type(reader);
+    case vhlo_encoding::kFutureV1Type:
+      return readFutureV1Type(reader);
     case vhlo_encoding::kTupleV1Type:
       return readTupleV1Type(reader);
     case vhlo_encoding::kUniformQuantizedPerAxisV1Type:
@@ -1110,8 +1202,9 @@ LogicalResult VhloBytecodeInterface::writeType(
     Type type, DialectBytecodeWriter& writer) const {
   return TypeSwitch<Type, LogicalResult>(type)
       .Case<ComplexV1Type, FunctionV1Type, RankedTensorV1Type, TokenV1Type,
-            TupleV1Type, UnrankedTensorV1Type, UniformQuantizedPerAxisV1Type,
-            UniformQuantizedV1Type, RankedBufferV1Type>([&](auto type) {
+            FutureV1Type, TupleV1Type, UnrankedTensorV1Type,
+            UniformQuantizedPerAxisV1Type, UniformQuantizedV1Type,
+            RankedBufferV1Type>([&](auto type) {
         LOG_WRITE_CALL;
         return write(type, writer), success();
       })
@@ -1342,6 +1435,24 @@ TokenV1Type VhloBytecodeInterface::readTokenV1Type(
 void VhloBytecodeInterface::write(TokenV1Type type,
                                   DialectBytecodeWriter& writer) const {
   writer.writeVarInt(vhlo_encoding::kTokenV1Type);
+}
+
+//===----------------------------------------------------------------------===//
+// FutureV1Type
+//===----------------------------------------------------------------------===//
+
+FutureV1Type VhloBytecodeInterface::readFutureV1Type(
+    DialectBytecodeReader& reader) const {
+  LOG_READ_CALL;
+  SmallVector<Type> types;
+  if (failed(reader.readTypes(types))) return FutureV1Type();
+  return FutureV1Type::get(getContext(), types);
+}
+
+void VhloBytecodeInterface::write(FutureV1Type type,
+                                  DialectBytecodeWriter& writer) const {
+  writer.writeVarInt(vhlo_encoding::kFutureV1Type);
+  writer.writeTypes(type.getTypes());
 }
 
 //===----------------------------------------------------------------------===//
