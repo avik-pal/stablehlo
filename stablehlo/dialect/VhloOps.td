@@ -166,6 +166,17 @@ def VHLO_AndOpV1 : VHLO_Op<"and_v1", "0.9.0", "current"> {
   let results = (outs VHLO_AnyType:$result);
 }
 
+def VHLO_AsyncStartOpV1 : VHLO_Op<"async_start_v1", "1.15.0", "current"> {
+  let arguments = (ins Variadic<VHLO_AnyType>:$operands);
+  let regions = (region VHLO_AnyRegion:$collective);
+  let results = (outs VHLO_AnyType:$result);
+}
+
+def VHLO_AsyncDoneOpV1 : VHLO_Op<"async_done_v1", "1.15.0", "current"> {
+  let arguments = (ins VHLO_AnyType:$operand);
+  let results = (outs VHLO_AnyType:$result);
+}
+
 def VHLO_Atan2OpV1 : VHLO_Op<"atan2_v1", "0.9.0", "current"> {
   let arguments = (ins VHLO_AnyType:$lhs, VHLO_AnyType:$rhs);
   let results = (outs VHLO_AnyType:$result);
@@ -326,7 +337,7 @@ def VHLO_ComplexOpV1 : VHLO_Op<"complex_v1", "0.9.0", "current"> {
   let results = (outs VHLO_AnyType:$result);
 }
 
-def VHLO_CompositeOpV1 : VHLO_Op<"composite_v1", "0.19.0", "current"> {
+def VHLO_CompositeOpV1 : VHLO_Op<"composite_v1", "0.19.0", "1.13.0"> {
   let arguments = (ins
     Variadic<VHLO_AnyType>:$inputs,
     VHLO_AnyAttr:$name,
@@ -334,6 +345,18 @@ def VHLO_CompositeOpV1 : VHLO_Op<"composite_v1", "0.19.0", "current"> {
     VHLO_AnyAttr:$decomposition,
     VHLO_AnyAttr:$version
   );
+  let results = (outs Variadic<VHLO_AnyType>:$results);
+}
+
+def VHLO_CompositeOpV2 : VHLO_Op<"composite_v2", "1.14.0", "current"> {
+  let arguments = (ins
+    Variadic<VHLO_AnyType>:$inputs,
+    VHLO_AnyAttr:$name,
+    VHLO_AnyAttr:$composite_attributes,
+    VHLO_AnyAttr:$decomposition,
+    VHLO_AnyAttr:$version
+  );
+  let regions = (region VariadicRegion<VHLO_AnyRegion>:$composite_regions);
   let results = (outs Variadic<VHLO_AnyType>:$results);
 }
 
