@@ -28,6 +28,7 @@ limitations under the License.
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Rewrite/FrozenRewritePatternSet.h"
@@ -80,6 +81,16 @@ class StablehloToVhloTypeConverter : public vhlo::VhloTypeConverter {
     });
     addConversion([](TokenType token) -> Type {
       return vhlo::TokenV1Type::get(token.getContext());
+    });
+    addConversion([this](FutureType future) -> Type {
+      LLVM_DEBUG(llvm::dbgs() << "Converting FutureType\n");
+      SmallVector<Type> types;
+      for (auto type : future.getTypes()) {
+        auto convertedType = convertType(type);
+        if (!convertedType) return {};
+        types.push_back(convertedType);
+      }
+      return vhlo::FutureV1Type::get(future.getContext(), types);
     });
     addBuiltinToVhloConversions();
     if (allowOtherDialects) {
@@ -164,6 +175,62 @@ Attribute convertGeneric(Attribute stablehloAttr,
                                            attr.getRtol(), attr.getUlps(),
                                            modeAttr);
   }
+  if (auto attr = dyn_cast<stablehlo::SubAxisInfoAttr>(stablehloAttr)) {
+    return vhlo::SubAxisInfoV1Attr::get(attr.getContext(), attr.getPreSize(),
+                                        attr.getSize());
+  }
+  if (auto attr = dyn_cast<stablehlo::AxisRefAttr>(stablehloAttr)) {
+    auto vhloName = convertGeneric(
+        StringAttr::get(attr.getContext(), attr.getName()), typeConverter);
+    auto vhloSubAxisInfo =
+        attr.getSubAxisInfo()
+            ? convertGeneric(attr.getSubAxisInfo(), typeConverter)
+            : Attribute();
+    return vhlo::AxisRefV1Attr::get(attr.getContext(), vhloName,
+                                    vhloSubAxisInfo);
+  }
+  if (auto attr = dyn_cast<stablehlo::MeshAxisAttr>(stablehloAttr)) {
+    auto vhloName = convertGeneric(
+        StringAttr::get(attr.getContext(), attr.getName()), typeConverter);
+    return vhlo::MeshAxisV1Attr::get(attr.getContext(), vhloName,
+                                     attr.getSize());
+  }
+  if (auto attr = dyn_cast<stablehlo::MeshAttr>(stablehloAttr)) {
+    SmallVector<Attribute> vhloAxesAttrs;
+    for (auto axis : attr.getAxes()) {
+      auto vhloAxis = convertGeneric(axis, typeConverter);
+      if (!vhloAxis) return {};
+      vhloAxesAttrs.push_back(vhloAxis);
+    }
+    auto vhloAxes = vhlo::ArrayV1Attr::get(attr.getContext(), vhloAxesAttrs);
+    auto vhloDeviceIds =
+        attr.getDeviceIds() ? convertGeneric(attr.getDeviceIds(), typeConverter)
+                            : Attribute();
+    return vhlo::MeshV1Attr::get(attr.getContext(), vhloAxes, vhloDeviceIds);
+  }
+  if (auto attr =
+          dyn_cast<stablehlo::ReplicaGroupMeshAxesAttr>(stablehloAttr)) {
+    Attribute vhloMesh;
+    if (auto symbolRef = dyn_cast<FlatSymbolRefAttr>(attr.getMesh())) {
+      vhloMesh =
+          vhlo::StringV1Attr::get(attr.getContext(), symbolRef.getValue());
+    } else {
+      vhloMesh = convertGeneric(attr.getMesh(), typeConverter);
+    }
+    if (!vhloMesh) return {};
+
+    SmallVector<Attribute> vhloAxesAttrs;
+    for (auto axis : attr.getAxes()) {
+      auto vhloAxis = convertGeneric(axis, typeConverter);
+      if (!vhloAxis) return {};
+      vhloAxesAttrs.push_back(vhloAxis);
+    }
+    auto vhloAxes = vhlo::ArrayV1Attr::get(attr.getContext(), vhloAxesAttrs);
+
+    return vhlo::ReplicaGroupMeshAxesV1Attr::get(attr.getContext(), vhloMesh,
+                                                 vhloAxes);
+  }
+
   if (llvm::isa<stablehlo::StablehloDialect>(stablehloAttr.getDialect())) {
     // All StableHLO attributes must have counterparts in VHLO.
     return {};
@@ -181,7 +248,7 @@ Attribute convertGeneric(Attribute stablehloAttr,
     }
     return vhlo::ArrayV1Attr::get(stablehloAttrs.getContext(), vhloAttrs);
   }
-  if (auto attr = dyn_cast<DenseIntOrFPElementsAttr>(stablehloAttr)) {
+  if (auto attr = dyn_cast<DenseTypedElementsAttr>(stablehloAttr)) {
     auto vhloType = typeConverter->convertType(attr.getType());
     LLVM_DEBUG(llvm::dbgs() << "Converted " << vhloType << '\n');
     if (!vhloType) return {};
@@ -1024,17 +1091,18 @@ class StablehloToVhloOpConverter : public OpConversionPattern<StablehloOpTy> {
     // stablehlo.case that uses a variadic number of regions which means an
     // additional argument for the generic builder.
     StablehloToVhloOp<StablehloOpTy> vhloOp;
-    if constexpr (std::is_same<StablehloOpTy, stablehlo::CaseOp>::value) {
-      vhloOp = vhlo::CaseOpV1::create(rewriter, stablehloOp.getLoc(), vhloTypes,
-                                      vhloOperands, vhloAttrs,
-                                      stablehloOp.getBranches().size());
+    if constexpr (StablehloOpTy::template hasTrait<
+                      OpTrait::VariadicRegions>()) {
+      vhloOp = StablehloToVhloOp<StablehloOpTy>::create(
+          rewriter, stablehloOp.getLoc(), vhloTypes, vhloOperands, vhloAttrs,
+          stablehloOp.getNumRegions());
     } else {
       vhloOp = StablehloToVhloOp<StablehloOpTy>::create(
           rewriter, stablehloOp.getLoc(), vhloTypes, vhloOperands, vhloAttrs);
     }
 
     for (auto [stablehloRegion, vhloRegion] :
-         llvm::zip(stablehloOp->getRegions(), vhloOp->getRegions())) {
+         llvm::zip_equal(stablehloOp->getRegions(), vhloOp->getRegions())) {
       rewriter.inlineRegionBefore(stablehloRegion, vhloRegion,
                                   vhloRegion.end());
       if (failed(rewriter.convertRegionTypes(&vhloRegion,

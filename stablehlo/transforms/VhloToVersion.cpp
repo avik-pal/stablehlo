@@ -153,6 +153,18 @@ LogicalResult isLegalAttribute(const Attribute& attr, Version targetVersion) {
     return isLegalType(typeAttr.getValue(), targetVersion);
   if (auto resultAccuracyAttr = dyn_cast<ResultAccuracyV1Attr>(attr))
     return isLegalAttribute(resultAccuracyAttr.getMode(), targetVersion);
+  if (auto axisRefAttr = dyn_cast<AxisRefV1Attr>(attr)) {
+    return success(
+        succeeded(isLegalAttribute(axisRefAttr.getName(), targetVersion)) &&
+        (!axisRefAttr.getSubAxisInfo() ||
+         succeeded(
+             isLegalAttribute(axisRefAttr.getSubAxisInfo(), targetVersion))));
+  }
+  if (auto meshAxesAttr = dyn_cast<ReplicaGroupMeshAxesV1Attr>(attr)) {
+    return success(
+        succeeded(isLegalAttribute(meshAxesAttr.getMesh(), targetVersion)) &&
+        succeeded(isLegalAttribute(meshAxesAttr.getAxes(), targetVersion)));
+  }
 
   // Is VHLO and valid version, success.
   return success();
@@ -480,6 +492,36 @@ struct AllReduceOpV2ToV1 : public OpRewritePattern<AllReduceOpV2> {
   }
 };
 
+struct CompositeOpV1ToV2 : public OpRewritePattern<CompositeOpV1> {
+  using OpRewritePattern<CompositeOpV1>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(CompositeOpV1 op,
+                                PatternRewriter& rewriter) const override {
+    auto newOp = rewriter.replaceOpWithNewOp<CompositeOpV2>(
+        op, op->getResultTypes(), op.getInputs(), op.getName(),
+        op.getCompositeAttributes(), op.getDecomposition(), op.getVersion(),
+        /*composite_regionsCount=*/0);
+    copyDiscardableAttrs(op, newOp);
+    return success();
+  }
+};
+
+struct CompositeOpV2ToV1 : public OpRewritePattern<CompositeOpV2> {
+  using OpRewritePattern<CompositeOpV2>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(CompositeOpV2 op,
+                                PatternRewriter& rewriter) const override {
+    if (!op.getCompositeRegions().empty()) {
+      return rewriter.notifyMatchFailure(op, "non-empty regions");
+    }
+    auto newOp = rewriter.replaceOpWithNewOp<CompositeOpV1>(
+        op, op->getResultTypes(), op.getInputs(), op.getName(),
+        op.getCompositeAttributes(), op.getDecomposition(), op.getVersion());
+    copyDiscardableAttrs(op, newOp);
+    return success();
+  }
+};
+
 #include "stablehlo/transforms/VhloToVersionPatterns.h.inc"
 
 }  // namespace
@@ -492,6 +534,7 @@ void populateVhloToVersionPatterns(MLIRContext* context,
   vhlo::populateWithGenerated(*patterns);
   patterns->add<vhlo::ScatterOpV1ToV2, vhlo::ScatterOpV2ToV1>(context);
   patterns->add<vhlo::AllReduceOpV1ToV2, vhlo::AllReduceOpV2ToV1>(context);
+  patterns->add<vhlo::CompositeOpV1ToV2, vhlo::CompositeOpV2ToV1>(context);
 }
 
 }  // namespace stablehlo

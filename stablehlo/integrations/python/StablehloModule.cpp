@@ -13,6 +13,7 @@ limitations under the License.
 
 #include <vector>
 
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "mlir-c/IR.h"
 #include "mlir-c/Support.h"
 #include "mlir/Bindings/Python/NanobindAdaptors.h"
@@ -99,6 +100,26 @@ NB_MODULE(_stablehlo, m) {
           nb::arg("cls"), nb::arg("context").none() = nb::none(),
           "Creates a Token type.");
 
+  mlir::python::nanobind_adaptors::mlir_type_subclass(m, "FutureType",
+                                                      stablehloTypeIsAFuture)
+      .def_classmethod(
+          "get",
+          [](nb::object cls, const std::vector<MlirType>& types,
+             MlirContext ctx) {
+            return cls(stablehloFutureTypeGet(ctx, types.size(), types.data()));
+          },
+          nb::arg("cls"), nb::arg("types"),
+          nb::arg("context").none() = nb::none(), "Creates a Future type.")
+      .def_property_readonly("types", [](MlirType self) {
+        std::vector<MlirType> types;
+        intptr_t numTypes = stablehloFutureTypeGetNumTypes(self);
+        types.reserve(numTypes);
+        for (intptr_t i = 0; i < numTypes; ++i) {
+          types.push_back(stablehloFutureTypeGetType(self, i));
+        }
+        return types;
+      });
+
   //
   // Attributes.
   //
@@ -114,11 +135,11 @@ NB_MODULE(_stablehlo, m) {
       stablehloAttributeIsAScatterDimensionNumbers)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::vector<int64_t> &updateWindowDims,
-             const std::vector<int64_t> &insertedWindowDims,
-             const std::vector<int64_t> &inputBatchingDims,
-             const std::vector<int64_t> &scatterIndicesBatchingDims,
-             const std::vector<int64_t> &scatteredDimsToOperandDims,
+          [](nb::object cls, const std::vector<int64_t>& updateWindowDims,
+             const std::vector<int64_t>& insertedWindowDims,
+             const std::vector<int64_t>& inputBatchingDims,
+             const std::vector<int64_t>& scatterIndicesBatchingDims,
+             const std::vector<int64_t>& scatteredDimsToOperandDims,
              int64_t indexVectorDim, MlirContext ctx) {
             return cls(stablehloScatterDimensionNumbersGet(
                 ctx, updateWindowDims.size(), updateWindowDims.data(),
@@ -175,11 +196,11 @@ NB_MODULE(_stablehlo, m) {
       m, "GatherDimensionNumbers", stablehloAttributeIsAGatherDimensionNumbers)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::vector<int64_t> &offsetDims,
-             const std::vector<int64_t> &collapsedSliceDims,
-             const std::vector<int64_t> &operandBatchingDims,
-             const std::vector<int64_t> &startIndicesBatchingDims,
-             const std::vector<int64_t> &startIndexMap, int64_t indexVectorDim,
+          [](nb::object cls, const std::vector<int64_t>& offsetDims,
+             const std::vector<int64_t>& collapsedSliceDims,
+             const std::vector<int64_t>& operandBatchingDims,
+             const std::vector<int64_t>& startIndicesBatchingDims,
+             const std::vector<int64_t>& startIndexMap, int64_t indexVectorDim,
              MlirContext ctx) {
             return cls(stablehloGatherDimensionNumbersGet(
                 ctx, offsetDims.size(), offsetDims.data(),
@@ -296,10 +317,10 @@ NB_MODULE(_stablehlo, m) {
       m, "DotDimensionNumbers", stablehloAttributeIsADotDimensionNumbers)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::vector<int64_t> &lhsBatchingDims,
-             const std::vector<int64_t> &rhsBatchingDims,
-             const std::vector<int64_t> &lhsContractingDims,
-             const std::vector<int64_t> &rhsContractingDims, MlirContext ctx) {
+          [](nb::object cls, const std::vector<int64_t>& lhsBatchingDims,
+             const std::vector<int64_t>& rhsBatchingDims,
+             const std::vector<int64_t>& lhsContractingDims,
+             const std::vector<int64_t>& rhsContractingDims, MlirContext ctx) {
             return cls(stablehloDotDimensionNumbersGet(
                 ctx, lhsBatchingDims.size(), lhsBatchingDims.data(),
                 rhsBatchingDims.size(), rhsBatchingDims.data(),
@@ -472,7 +493,7 @@ NB_MODULE(_stablehlo, m) {
       stablehloAttributeIsAComparisonDirectionAttr)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::string &value, MlirContext ctx) {
+          [](nb::object cls, const std::string& value, MlirContext ctx) {
             return cls(stablehloComparisonDirectionAttrGet(
                 ctx, mlirStringRefCreate(value.c_str(), value.size())));
           },
@@ -487,7 +508,7 @@ NB_MODULE(_stablehlo, m) {
       m, "ComparisonTypeAttr", stablehloAttributeIsAComparisonTypeAttr)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::string &value, MlirContext ctx) {
+          [](nb::object cls, const std::string& value, MlirContext ctx) {
             return cls(stablehloComparisonTypeAttrGet(
                 ctx, mlirStringRefCreate(value.c_str(), value.size())));
           },
@@ -502,7 +523,7 @@ NB_MODULE(_stablehlo, m) {
       m, "PrecisionAttr", stablehloAttributeIsAPrecisionAttr)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::string &value, MlirContext ctx) {
+          [](nb::object cls, const std::string& value, MlirContext ctx) {
             return cls(stablehloPrecisionAttrGet(
                 ctx, mlirStringRefCreate(value.c_str(), value.size())));
           },
@@ -517,7 +538,7 @@ NB_MODULE(_stablehlo, m) {
       m, "FftTypeAttr", stablehloAttributeIsAFftTypeAttr)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::string &value, MlirContext ctx) {
+          [](nb::object cls, const std::string& value, MlirContext ctx) {
             return cls(stablehloFftTypeAttrGet(
                 ctx, mlirStringRefCreate(value.c_str(), value.size())));
           },
@@ -532,7 +553,7 @@ NB_MODULE(_stablehlo, m) {
       m, "TransposeAttr", stablehloAttributeIsATransposeAttr)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::string &value, MlirContext ctx) {
+          [](nb::object cls, const std::string& value, MlirContext ctx) {
             return cls(stablehloTransposeAttrGet(
                 ctx, mlirStringRefCreate(value.c_str(), value.size())));
           },
@@ -547,7 +568,7 @@ NB_MODULE(_stablehlo, m) {
       m, "RngDistributionAttr", stablehloAttributeIsARngDistributionAttr)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::string &value, MlirContext ctx) {
+          [](nb::object cls, const std::string& value, MlirContext ctx) {
             return cls(stablehloRngDistributionAttrGet(
                 ctx, mlirStringRefCreate(value.c_str(), value.size())));
           },
@@ -562,7 +583,7 @@ NB_MODULE(_stablehlo, m) {
       m, "RngAlgorithmAttr", stablehloAttributeIsARngAlgorithmAttr)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::string &value, MlirContext ctx) {
+          [](nb::object cls, const std::string& value, MlirContext ctx) {
             return cls(stablehloRngAlgorithmAttrGet(
                 ctx, mlirStringRefCreate(value.c_str(), value.size())));
           },
@@ -597,7 +618,7 @@ NB_MODULE(_stablehlo, m) {
       m, "TypeExtensions", stablehloAttributeIsTypeExtensions)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::vector<int64_t> &bounds,
+          [](nb::object cls, const std::vector<int64_t>& bounds,
              MlirContext ctx) {
             return cls(
                 stablehloTypeExtensionsGet(ctx, bounds.size(), bounds.data()));
@@ -616,7 +637,7 @@ NB_MODULE(_stablehlo, m) {
       .def_classmethod(
           "get",
           [](nb::object cls, double atol, double rtol, int64_t ulps,
-             const std::string &mode, MlirContext ctx) {
+             const std::string& mode, MlirContext ctx) {
             return cls(stablehloResultAccuracyAttrGet(
                 ctx, atol, rtol, ulps,
                 mlirStringRefCreate(mode.c_str(), mode.size())));
@@ -645,7 +666,7 @@ NB_MODULE(_stablehlo, m) {
       m, "ResultAccuracyModeAttr", stablehloAttributeIsAResultAccuracyModeAttr)
       .def_classmethod(
           "get",
-          [](nb::object cls, const std::string &value, MlirContext ctx) {
+          [](nb::object cls, const std::string& value, MlirContext ctx) {
             return cls(stablehloResultAccuracyModeAttrGet(
                 ctx, mlirStringRefCreate(value.c_str(), value.size())));
           },
