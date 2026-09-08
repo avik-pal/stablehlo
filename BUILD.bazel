@@ -349,6 +349,7 @@ cc_library(
     deps = [
         ":base",
         ":interpreter_ops_inc_gen",
+        ":reference_configuration",
         ":reference_numpy",
         ":reference_ops",
         ":reference_process",
@@ -649,6 +650,7 @@ cc_library(
         ":reference_token",
         ":reference_types",
         ":reference_value",
+        ":replica_group_utils",
         ":stablehlo_ops",
         ":stablehlo_type_inference",
         "@llvm-project//llvm:Support",
@@ -1183,6 +1185,7 @@ cc_library(
         ":broadcast_utils",
         ":chlo_ops",
         ":chlo_rewriters_inc_gen",
+        ":replica_group_utils",
         ":stablehlo_aggressive_simplification_inc_gen",
         ":stablehlo_broadcast_lowering",
         ":stablehlo_create_compatibility_expander_inc_gen",
@@ -1202,6 +1205,7 @@ cc_library(
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:ArithDialect",
         "@llvm-project//mlir:AsmParser",
+        "@llvm-project//mlir:CallOpInterfaces",
         "@llvm-project//mlir:CommonFolders",
         "@llvm-project//mlir:ComplexDialect",
         "@llvm-project//mlir:DialectUtils",
@@ -1215,6 +1219,7 @@ cc_library(
         "@llvm-project//mlir:ReconcileUnrealizedCasts",
         "@llvm-project//mlir:Rewrite",
         "@llvm-project//mlir:ShapeDialect",
+        "@llvm-project//mlir:SideEffectInterfaces",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",
@@ -1354,6 +1359,23 @@ cc_library(
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:InferTypeOpInterface",
         "@llvm-project//mlir:QuantOps",
+        "@llvm-project//mlir:Support",
+    ],
+)
+
+cc_library(
+    name = "replica_group_utils",
+    srcs = [
+        "stablehlo/dialect/ReplicaGroupUtils.cpp",
+    ],
+    hdrs = [
+        "stablehlo/dialect/ReplicaGroupUtils.h",
+    ],
+    strip_include_prefix = ".",
+    deps = [
+        ":stablehlo_ops",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//mlir:IR",
         "@llvm-project//mlir:Support",
     ],
 )

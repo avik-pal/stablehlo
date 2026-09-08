@@ -112,7 +112,7 @@ class LazyPlaceholderValue {
         bool losesInfo;
         apFloatZero.convert(realImagComponentFloatType.getFloatSemantics(),
                             llvm::RoundingMode::NearestTiesToEven, &losesInfo);
-        std::complex<APFloat> complexZeroScalar(apFloatZero, apFloatZero);
+        mlir::Complex<APFloat> complexZeroScalar(apFloatZero, apFloatZero);
         auto complexZeroSplat =
             SplatElementsAttr::get(shapedType, complexZeroScalar);
         return LazyPlaceholderValue(
@@ -209,11 +209,13 @@ TypedAttr foldBinaryOpIntOrFloat(Type resultType, TypedAttr lhs, TypedAttr rhs,
 
   Attribute res;
   if (isa<IntegerType>(elemTy))
-    res = constFoldBinaryOp<IntegerAttr, IntegerAttr::ValueType, void,
-                            IntResultType>(operands, resultType, folder);
+    res = constFoldBinaryOp<IntegerAttr, IntegerAttr, IntegerAttr::ValueType,
+                            IntegerAttr::ValueType, void, IntResultType>(
+        operands, resultType, folder);
   if (isa<FloatType>(elemTy))
-    res = constFoldBinaryOp<FloatAttr, FloatAttr::ValueType, void,
-                            FloatResultType>(operands, resultType, folder);
+    res = constFoldBinaryOp<FloatAttr, FloatAttr, FloatAttr::ValueType,
+                            FloatAttr::ValueType, void, FloatResultType>(
+        operands, resultType, folder);
   if (res) return cast<TypedAttr>(res);
 
   return nullptr;
@@ -245,7 +247,7 @@ FailureOr<TypedAttr> foldBinaryOpIntOrFloat(PatternRewriter& rewriter,
 template <class AttrElementT, class TargetAttrElementT, class CalculationT,
           typename OpType>
 LogicalResult foldConvertHelper(PatternRewriter& rewriter, OpType op,
-                                DenseIntOrFPElementsAttr elements, Type resType,
+                                DenseTypedElementsAttr elements, Type resType,
                                 CalculationT&& calculate) {
   auto result = constFoldCastOp<AttrElementT, TargetAttrElementT,
                                 typename AttrElementT::ValueType,
@@ -265,7 +267,7 @@ LogicalResult foldConvertHelper(PatternRewriter& rewriter, OpType op,
 
 template <typename OpType>
 LogicalResult foldConvert(PatternRewriter& rewriter, OpType op,
-                          DenseIntOrFPElementsAttr elements,
+                          DenseTypedElementsAttr elements,
                           RankedTensorType resultType) {
   auto oldType = getElementTypeOrSelf(elements);
   auto newType = getElementTypeOrSelf(resultType);
@@ -989,7 +991,7 @@ struct FoldConvertOpPattern : public ShapeOpRewritePattern<ConvertOp> {
         (isa<FloatType>(operandElemType) || isa<FloatType>(resultElemType)))
       return rewriter.notifyMatchFailure(op, "skipping fold of float convert");
 
-    DenseIntOrFPElementsAttr elements;
+    DenseTypedElementsAttr elements;
     if (!matchPattern(operand, m_Constant(&elements)))
       return rewriter.notifyMatchFailure(
           op, "expected constant integer or float operand");
@@ -997,6 +999,20 @@ struct FoldConvertOpPattern : public ShapeOpRewritePattern<ConvertOp> {
     return foldConvert(rewriter, op, elements, resultType);
   }
 };
+
+// Returns true if the divisor (second operand) of `op` is a constant integer
+// tensor with any zero element. Integer udiv/sdiv/urem/srem by zero would crash
+// the constant folder (APInt asserts in debug, SIGFPE in release), so such ops
+// must not be folded.
+static bool integerDivisorHasZeroElement(Operation* op) {
+  TypedAttr rhsAttr;
+  matchPattern(op->getOperand(1), m_Constant(&rhsAttr));
+  auto denseRhs = dyn_cast_or_null<DenseIntElementsAttr>(rhsAttr);
+  if (!denseRhs) return false;
+  for (const APInt& value : denseRhs.getValues<APInt>())
+    if (value.isZero()) return true;
+  return false;
+}
 
 struct FoldDivOpPattern : public ShapeOpRewritePattern<DivOp> {
   using ShapeOpRewritePattern::ShapeOpRewritePattern;
@@ -1006,6 +1022,10 @@ struct FoldDivOpPattern : public ShapeOpRewritePattern<DivOp> {
     auto resultType = op.getType();
     if (failed(validateShapeFoldDtype(rewriter, op, resultType)))
       return failure();
+
+    if (isa<IntegerType>(resultType.getElementType()) &&
+        integerDivisorHasZeroElement(op))
+      return rewriter.notifyMatchFailure(op, "integer division by zero");
 
     bool isUnsignedInt = resultType.getElementType().isUnsignedInteger();
     auto res = foldBinaryOpIntOrFloat(rewriter, op, FoldDivide(isUnsignedInt));
@@ -1223,6 +1243,10 @@ struct FoldRemOpPattern : public ShapeOpRewritePattern<RemOp> {
     if (failed(validateShapeFoldDtype(rewriter, op, resultType)))
       return failure();
 
+    if (isa<IntegerType>(resultType.getElementType()) &&
+        integerDivisorHasZeroElement(op))
+      return rewriter.notifyMatchFailure(op, "integer remainder by zero");
+
     bool isUnsignedInt = resultType.getElementType().isUnsignedInteger();
     auto res = foldBinaryOpIntOrFloat(rewriter, op, FoldRem(isUnsignedInt));
     if (failed(res)) return failure();
@@ -1264,6 +1288,132 @@ struct FoldReshapeOpPattern : public ShapeOpRewritePattern<ReshapeOp> {
     if (!matchPattern(op.getOperand(), m_Constant(&attr)))
       return rewriter.notifyMatchFailure(op, "expected constant operand");
     rewriter.replaceOpWithNewOp<ConstantOp>(op, attr.reshape(resultType));
+    return success();
+  }
+};
+
+// foldReverseHelper handles the three cases:
+//   - If the input is a splat, the reverse is a no-op.
+//   - If the input has 0 elements, the reverse is a no-op. Note that,
+//   this also handles cases where any dimension has size 0. If any
+//   dimension is 0 then the product of all dimensions is 0.
+//   - If the input is compile-time constant, and its elements are either
+//   integer or float, then reverse the elements.
+//
+// Before calling this function, matchAndRewrite has handled input that have
+// empty dimensions to reverse, or all dimensions of tensor have size 1.
+template <typename T>
+static DenseElementsAttr foldReverseHelper(const DenseElementsAttr attr,
+                                           const ShapedType type,
+                                           ArrayRef<int64_t> dims) {
+  // flat array representation of the input tensor
+  SmallVector<T> result(attr.getValues<T>().begin(), attr.getValues<T>().end());
+  int64_t numElements = attr.getNumElements();
+
+  size_t rank = type.getRank();
+  // stride[i] is the number of elements contained within Dimension i and all
+  // dimensions that follow it. It is the "jump size" required to skip over one
+  // full unit of the previous dimension
+  SmallVector<int64_t> stride(rank + 1, numElements);
+
+  for (size_t i = 0; i < rank; i++) {
+    stride[i + 1] = stride[i] / type.getDimSize(i);
+  }
+
+  for (int64_t dim : dims) {
+    // For example, given:
+    //   * tensor: tensor<2x3x2xi32>
+    //     [[[1, 2], [3, 4], [5, 6]], [[7, 8], [9,10], [11, 12]]]
+    //   * dim: [1]
+    //
+    // We're going to reverse the tensor with respect to dim as follows:
+    //   1) Split the tensor into blocks, i.e. smaller tensors whose type is
+    //   derived from the tensor by dropping the first `dim` dimensions, i.e.
+    //   tensor<3x2xi32> for the running example.
+    //   2) Split each block into windows, i.e. even smaller tensors whose type
+    //   is derived from the block by dropping the first dimension of the
+    //   block, i.e. tensor<2xi32> for the running example.
+    //   3) Within each block, swap windows but don't change the order of
+    //   elements within the windows: 0th window goes to N-1st spot, 1st window
+    //   goes to N-2nd spot etc.
+    //
+    // For the running example, the result will be:
+    //   [[[5, 6], [3, 4], [1, 2]], [[11, 12], [9, 10], [7, 8]]].
+    //
+    // Note how elements within windows haven't changed their order with respect
+    // to each other and how blocks haven't changed their order with respect to
+    // each other.
+
+    // numWindows is the dimension size of the dimension to reverse.
+    int64_t numWindows = type.getDimSize(dim);
+    // windowSize is the number of slices to cut the block
+    int64_t windowSize = stride[dim] / numWindows;
+    // numBlocks can be viewed as the contiguous block elements on a flat array
+    // to reverse
+    int64_t numBlocks = numElements / stride[dim];
+
+    for (int64_t block = 0; block < numBlocks; ++block) {
+      for (int64_t window = 0; window < numWindows / 2; ++window) {
+        // reversedWindow is the window that will be swapped with the window.
+        int64_t reversedWindow = numWindows - window - 1;
+
+        // windowStart is the starting index of the window in the result array.
+        int64_t windowStart = block * stride[dim] + window * windowSize;
+        // reversedWindowStart is the starting index of the reversed window in
+        // the result array.
+        int64_t reversedWindowStart =
+            block * stride[dim] + reversedWindow * windowSize;
+
+        // Swap elements along the window with the elements along the reversed
+        // window.
+        for (int64_t i = 0; i < windowSize; ++i) {
+          std::swap(result[windowStart + i], result[reversedWindowStart + i]);
+        }
+      }
+    }
+  }
+  return DenseElementsAttr::get(type, result);
+}
+
+struct FoldReverseOpPattern : public ShapeOpRewritePattern<ReverseOp> {
+  using ShapeOpRewritePattern::ShapeOpRewritePattern;
+
+  LogicalResult matchAndRewrite(ReverseOp op,
+                                PatternRewriter& rewriter) const override {
+    Value input = op.getOperand();
+    auto shapedType = cast<ShapedType>(input.getType());
+
+    // Validate shapedType and element count of resultType
+    if (failed(validateStaticShapeResult(rewriter, op, shapedType)) ||
+        failed(validateElementCountForFold(rewriter, op, shapedType)))
+      return failure();
+
+    DenseElementsAttr inputAttr;
+    if (!matchPattern(input, m_Constant(&inputAttr))) {
+      return rewriter.notifyMatchFailure(op, "expected constant operand");
+    }
+
+    // Handle trivial reverses in simplifier
+    ArrayRef<int64_t> dims = op.getDimensions();
+    bool allReverseDimsOne = llvm::all_of(
+        dims, [&](int64_t dim) { return shapedType.getDimSize(dim) == 1; });
+    if (dims.empty() || shapedType.getNumElements() <= 1 ||
+        inputAttr.isSplat() || allReverseDimsOne) {
+      return rewriter.notifyMatchFailure(
+          op, "trivial reverse handled by simplifier");
+    }
+
+    auto elementType = shapedType.getElementType();
+    DenseElementsAttr resultAttr;
+    if (isa<IntegerType>(elementType)) {
+      resultAttr = foldReverseHelper<APInt>(inputAttr, shapedType, dims);
+    } else if (isa<FloatType>(elementType)) {
+      resultAttr = foldReverseHelper<APFloat>(inputAttr, shapedType, dims);
+    } else {
+      return rewriter.notifyMatchFailure(op,
+                                         "unsupported element type to reverse");
+    }
+    rewriter.replaceOpWithNewOp<ConstantOp>(op, resultAttr);
     return success();
   }
 };
@@ -1986,6 +2136,47 @@ struct FoldWhileOpIfDeadAndPresumedPure : public FoldOpRewritePattern<WhileOp> {
   }
 };
 
+struct FoldXorOpPattern : public ShapeOpRewritePattern<XorOp> {
+  using ShapeOpRewritePattern::ShapeOpRewritePattern;
+
+  LogicalResult matchAndRewrite(XorOp op,
+                                PatternRewriter& rewriter) const override {
+    auto resultType = op.getType();
+    auto resultElementType = resultType.getElementType();
+    FailureOr<TypedAttr> result;
+
+    if (resultElementType.isInteger(/*width=*/1)) {
+      result = foldBinaryOpIntOrFloat(rewriter, op, FoldLogicalXor{});
+    } else if (resultElementType.isInteger()) {
+      result = foldBinaryOpIntOrFloat(rewriter, op, FoldBitwiseXor{});
+    } else {
+      return rewriter.notifyMatchFailure(op, "Expected integral element type.");
+    }
+
+    if (failed(result)) return failure();
+    rewriter.replaceOpWithNewOp<mlir::stablehlo::ConstantOp>(op,
+                                                             result.value());
+    return success();
+  }
+
+  struct FoldLogicalXor {
+    APInt operator()(APInt lhs, APInt rhs) const {
+      return APInt(lhs.getBitWidth(), !lhs.isZero() ^ !rhs.isZero());
+    }
+    std::optional<APFloat> operator()(APFloat lhs, APFloat rhs) const {
+      return std::nullopt;
+    }
+  };
+
+  struct FoldBitwiseXor {
+    APInt operator()(APInt lhs, APInt rhs) const { return lhs ^ rhs; }
+
+    std::optional<APFloat> operator()(APFloat lhs, APFloat rhs) const {
+      return std::nullopt;
+    }
+  };
+};
+
 struct StablehloAggressiveFolderPass
     : public impl::StablehloAggressiveFolderPassBase<
           StablehloAggressiveFolderPass> {
@@ -2039,6 +2230,7 @@ void populateStablehloAggressiveFolderPatterns(
                 FoldReduceOpReducingZeroDims,         //
                 FoldReduceOpToConstantInitializer,    //
                 FoldReduceOpWithRedundantResults,     //
+                FoldReverseOpPattern,                 //
                 FoldRoundOpPattern,                   //
                 FoldRoundNearestEvenOpPattern,        //
                 FoldRsqrtOpPattern,                   //
@@ -2049,6 +2241,7 @@ void populateStablehloAggressiveFolderPatterns(
                 FoldTransposeOpPattern,               //
                 FoldWhileOpIfDeadAndPresumedPure,     //
                 FoldWhileOpPattern,                   //
+                FoldXorOpPattern,                     //
                 InlineCaseOpWithConstantBranchIndex,  //
                 LowerBoolSplatConstantsIntoReduceOpRegion>(context, options,
                                                            benefit);

@@ -185,24 +185,18 @@ ParseResult parseFunctionBody(OpAsmParser& parser, Attribute& name,
 }
 
 void TensorV1Attr::print(mlir::AsmPrinter& odsPrinter) const {
-  odsPrinter << '<'
-             << DenseIntOrFPElementsAttr::getFromRawBuffer(
-                    llvm::cast<ShapedType>(
-                        convertTypeToBuiltinForPrint(getType())),
-                    getData())
-             << '>';
+  odsPrinter << '<' << getData() << '>';
 }
 
-// Parse tensor elements using DenseIntOrFPElementsAttr printing.
+// Parse tensor elements using DenseTypedElementsAttr printing.
 Attribute TensorV1Attr::parse(AsmParser& parser, mlir::Type) {
-  DenseIntOrFPElementsAttr attr;
+  DenseTypedElementsAttr attr;
   if (failed(parser.parseLess()) || failed(parser.parseAttribute(attr)) ||
       failed(parser.parseGreater())) {
     return TensorV1Attr();
   }
   return TensorV1Attr::get(parser.getContext(),
-                           convertTypeToVhloForParse(attr.getType()),
-                           attr.getRawData());
+                           convertTypeToVhloForParse(attr.getType()), attr);
 }
 
 void printEscapedString(AsmPrinter& p, llvm::StringRef value) {
@@ -352,11 +346,57 @@ LogicalResult verifyConstraint_1_3_0(mlir::Operation* op,
   return success();
 }
 
+LogicalResult verifyConstraint_1_17_0(mlir::Operation* op,
+                                      Version targetVersion) {
+  auto customCallOp = cast<mlir::vhlo::CustomCallOpV1>(op);
+  if (targetVersion < Version(1, 17, 0)) {
+    for (Type type : customCallOp.getInputs().getTypes()) {
+      if (isa<vhlo::FutureV1Type>(type)) {
+        return failure();
+      }
+    }
+  }
+  return success();
+}
+
+bool isVhloFp8Type(Type type) {
+  return isa<vhlo::FloatF8E3M4V1Type, vhlo::FloatF8E4M3V1Type,
+             vhlo::FloatF8E4M3FNV1Type, vhlo::FloatF8E5M2V1Type,
+             vhlo::FloatF8E4M3FNUZV1Type, vhlo::FloatF8E4M3B11FNUZV1Type,
+             vhlo::FloatF8E5M2FNUZV1Type, vhlo::FloatF8E8M0FNUV1Type>(type);
+}
+
+LogicalResult verifyConstraint_1_20_0(mlir::Operation* op,
+                                      Version targetVersion) {
+  if (targetVersion < Version(1, 20, 0)) {
+    if (op->getNumOperands() < 2) {
+      return failure();
+    }
+    Type lhsElementType = getVhloElementType(op->getOperand(0).getType());
+    Type rhsElementType = getVhloElementType(op->getOperand(1).getType());
+    if (lhsElementType != rhsElementType && isVhloFp8Type(lhsElementType) &&
+        isVhloFp8Type(rhsElementType)) {
+      return failure();
+    }
+  }
+  return success();
+}
+
 }  // namespace
 
 LogicalResult AllReduceOpV1::validateConstraint(mlir::Operation* op,
                                                 Version targetVersion) {
   return verifyConstraint_0_17_0(op, targetVersion);
+}
+
+LogicalResult ConvolutionOpV1::validateConstraint(mlir::Operation* op,
+                                                  Version targetVersion) {
+  return verifyConstraint_1_20_0(op, targetVersion);
+}
+
+LogicalResult DynamicConvOpV2::validateConstraint(mlir::Operation* op,
+                                                  Version targetVersion) {
+  return verifyConstraint_1_20_0(op, targetVersion);
 }
 
 LogicalResult ReduceOpV1::validateConstraint(mlir::Operation* op,
@@ -386,7 +426,9 @@ LogicalResult SelectAndScatterOpV1::validateConstraint(mlir::Operation* op,
 
 LogicalResult CustomCallOpV1::validateConstraint(mlir::Operation* op,
                                                  Version targetVersion) {
-  return verifyConstraint_1_3_0(op, targetVersion);
+  if (failed(verifyConstraint_1_17_0(op, targetVersion))) return failure();
+  if (failed(verifyConstraint_1_3_0(op, targetVersion))) return failure();
+  return success();
 }
 
 }  // namespace vhlo

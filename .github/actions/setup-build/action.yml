@@ -44,35 +44,6 @@ runs:
       path: llvm-project
       fetch-depth: 1
 
-  # Get ninja for cmake build.
-  - name: Install Ninja
-    uses: llvm/actions/install-ninja@6a57890d0e3f9f35dfc72e7e48bc5e1e527cdd6c
-
-  # Install up-to-date versions of Clang and LLD (plus a few related packages).
-  # - Update Clang to support newer compiler features.
-  # - Install LLD to improve build speed on Linux.
-  - name: Install/update Clang and LLD
-    shell: bash
-    run: |
-      wget https://apt.llvm.org/llvm.sh
-      chmod +x llvm.sh
-      sudo ./llvm.sh ${{ inputs.clang-version }}
-      for program_name in "clang" "clang++" "lld"; do
-        link_path="/usr/bin/$program_name"
-        link_target="/usr/bin/$program_name-${{ inputs.clang-version }}"
-        priority=200
-        sudo update-alternatives --install \
-          "$link_path" "$program_name" "$link_target" "$priority"
-      done
-
-  # Update the system C++ headers.
-  - name: Update system C++ headers
-    shell: bash
-    run: |
-      sudo apt-add-repository ppa:ubuntu-toolchain-r/test
-      sudo apt-get update
-      sudo apt-get install libstdc++-13-dev
-
   # Setup C++ caching using ccache.
   # Cache key is a combination of OS arch and LLVM version.
   - name: Ccache for C++ compilation
@@ -81,14 +52,7 @@ runs:
       key: ${{ runner.os }}-stablehlo_build_assets-${{ inputs.llvm-version }}
       max-size: 4G
 
-  # Install Python/Numpy for API tests
-  - name: Install Python and Pip
-    uses: actions/setup-python@v5
-    with:
-      python-version: ${{ inputs.python-version }}
-      cache: 'pip' # caching pip dependencies
-
   - name: Install MLIR python requirements
     shell: bash
     run: |
-      pip install -r $GITHUB_WORKSPACE/llvm-project/mlir/python/requirements.txt
+      python3 -m pip install -r $GITHUB_WORKSPACE/llvm-project/mlir/python/requirements.txt

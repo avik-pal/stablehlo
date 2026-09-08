@@ -1633,6 +1633,45 @@ Effects: `MemoryEffects::Effect{}`
 
 
 
+### `chlo.mulhi` (chlo::MulhiOp)
+
+_Mulhi operation_
+
+Syntax:
+
+```
+operation ::= `chlo.mulhi` $lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)
+```
+
+Performs element-wise multiplication of two N-bit integer tensors
+`lhs` and `rhs`, returning a N-bit integer `result` tensor containing
+the most significant N bits of the upcasted (N+N-bit) product.
+
+$$
+\text{mulhi}(x, y) = \text{downcast}((\text{upcast}(x) * \text{upcast}(y)) >> N)
+$$
+
+Traits: `AlwaysSpeculatableImplTrait`, `Commutative`, `CompatibleOperandsAndResultType`
+
+Interfaces: `ConditionallySpeculatable`, `InferShapedTypeOpInterface`, `InferTypeOpInterface`, `NoMemoryEffect (MemoryEffectOpInterface)`
+
+Effects: `MemoryEffects::Effect{}`
+
+#### Operands:
+
+| Operand | Description |
+| :-----: | ----------- |
+| `lhs` | ranked tensor of 2/4/8/16/32/64-bit integer values |
+| `rhs` | ranked tensor of 2/4/8/16/32/64-bit integer values |
+
+#### Results:
+
+| Result | Description |
+| :----: | ----------- |
+| `result` | ranked tensor of 2/4/8/16/32/64-bit integer values |
+
+
+
 ### `chlo.next_after` (chlo::NextAfterOp)
 
 _Std::nextafter operator_
@@ -1727,7 +1766,7 @@ the ragged dimension is an lhs/rhs batch dimension (`b`).
 
 Traits: `AlwaysSpeculatableImplTrait`
 
-Interfaces: `ConditionallySpeculatable`, `NoMemoryEffect (MemoryEffectOpInterface)`
+Interfaces: `ConditionallySpeculatable`, `InferShapedTypeOpInterface`, `NoMemoryEffect (MemoryEffectOpInterface)`
 
 Effects: `MemoryEffects::Effect{}`
 
@@ -1778,6 +1817,7 @@ Interfaces: `InferShapedTypeOpInterface`, `InferTypeOpInterface`, `OpAsmOpInterf
 <table>
 <tr><th>Attribute</th><th>MLIR Type</th><th>Description</th></tr>
 <tr><td><code>dimension</code></td><td>::mlir::IntegerAttr</td><td>64-bit signless integer attribute whose value is non-negative</td></tr>
+<tr><td><code>scan_dim_size</code></td><td>::mlir::IntegerAttr</td><td>64-bit signless integer attribute whose value is non-negative</td></tr>
 <tr><td><code>is_reverse</code></td><td>::mlir::BoolAttr</td><td>bool attribute</td></tr>
 <tr><td><code>is_associative</code></td><td>::mlir::BoolAttr</td><td>bool attribute</td></tr>
 </table>
@@ -1915,7 +1955,7 @@ _Finds values and indices of the `k` largest elements for the last dimension_
 Syntax:
 
 ```
-operation ::= `chlo.top_k` `(`$operand `,` `k` `=` $k`)` attr-dict `:`
+operation ::= `chlo.top_k` `(`$operand `,` `k` `=` $k (`,` `is_stable` `=` $is_stable^)? `)` attr-dict `:`
               type($operand) `->` `(`type($values)`,` type($indices)`)`
 ```
 
@@ -1930,7 +1970,9 @@ row (resp. vector along the last dimension).  Thus,
 values.shape = indices.shape = input.shape[:-1] + [k]
 ```
 
-If two elements are equal, the lower-index element appears first.
+If `is_stable` is true, the sort is stable: if two elements are equal, the
+lower-index element appears first. If false, the relative order of equal
+elements is implementation-defined.
 
 Traits: `AlwaysSpeculatableImplTrait`, `InferTensorType`
 
@@ -1943,6 +1985,7 @@ Effects: `MemoryEffects::Effect{}`
 <table>
 <tr><th>Attribute</th><th>MLIR Type</th><th>Description</th></tr>
 <tr><td><code>k</code></td><td>::mlir::IntegerAttr</td><td>64-bit signless integer attribute</td></tr>
+<tr><td><code>is_stable</code></td><td>::mlir::BoolAttr</td><td>bool attribute</td></tr>
 </table>
 
 #### Operands:
@@ -2007,7 +2050,7 @@ Syntax:
 
 ```
 #chlo.comparison_direction<
-  ::mlir::chlo::ComparisonDirection   # value
+  `EQ` | `NE` | `GE` | `GT` | `LE` | `LT`   # value
 >
 ```
 
@@ -2025,7 +2068,7 @@ Syntax:
 
 ```
 #chlo.comparison_type<
-  ::mlir::chlo::ComparisonType   # value
+  `NOTYPE` | `FLOAT` | `TOTALORDER` | `SIGNED` | `UNSIGNED`   # value
 >
 ```
 
@@ -2043,7 +2086,7 @@ Syntax:
 
 ```
 #chlo.precision<
-  ::mlir::chlo::Precision   # value
+  `DEFAULT` | `HIGH` | `HIGHEST`   # value
 >
 ```
 

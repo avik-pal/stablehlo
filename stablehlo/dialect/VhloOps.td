@@ -166,6 +166,17 @@ def VHLO_AndOpV1 : VHLO_Op<"and_v1", "0.9.0", "current"> {
   let results = (outs VHLO_AnyType:$result);
 }
 
+def VHLO_AsyncStartOpV1 : VHLO_Op<"async_start_v1", "1.15.0", "current"> {
+  let arguments = (ins Variadic<VHLO_AnyType>:$operands);
+  let regions = (region VHLO_AnyRegion:$collective);
+  let results = (outs VHLO_AnyType:$result);
+}
+
+def VHLO_AsyncDoneOpV1 : VHLO_Op<"async_done_v1", "1.15.0", "current"> {
+  let arguments = (ins VHLO_AnyType:$operand);
+  let results = (outs VHLO_AnyType:$result);
+}
+
 def VHLO_Atan2OpV1 : VHLO_Op<"atan2_v1", "0.9.0", "current"> {
   let arguments = (ins VHLO_AnyType:$lhs, VHLO_AnyType:$rhs);
   let results = (outs VHLO_AnyType:$result);
@@ -293,13 +304,35 @@ def VHLO_ClzOpV1 : VHLO_Op<"count_leading_zeros_v1", "0.9.0", "current"> {
   let results = (outs VHLO_AnyType:$result);
 }
 
-def VHLO_CollectiveBroadcastOpV1 : VHLO_Op<"collective_broadcast_v1", "0.16.0", "current"> {
+def VHLO_CollectiveBroadcastOpV1 : VHLO_Op<"collective_broadcast_v1", "0.16.0", "1.19.0"> {
   let arguments = (ins
     VHLO_AnyType:$operand,
     VHLO_AnyAttr:$replica_groups,
     VHLO_AnyAttr:$channel_id
   );
   let results = (outs VHLO_AnyType:$result);
+}
+
+def VHLO_CollectiveBroadcastOpV2 : VHLO_Op<"collective_broadcast_v2", "1.20.0", "current"> {
+  let arguments = (ins
+    Variadic<VHLO_AnyType>:$operands,
+    VHLO_AnyAttr:$replica_groups,
+    VHLO_AnyAttr:$channel_id,
+    VHLO_AnyAttr:$has_dynamic_root
+  );
+  let results = (outs Variadic<VHLO_AnyType>:$results);
+}
+
+def VHLO_CollectiveReduceOpV1 : VHLO_Op<"collective_reduce_v1", "1.19.0", "current"> {
+  let arguments = (ins
+    Variadic<VHLO_AnyType>:$operands,
+    VHLO_AnyAttr:$replica_groups,
+    VHLO_AnyAttr:$channel_id,
+    VHLO_AnyAttr:$use_global_device_ids,
+    VHLO_AnyAttr:$has_dynamic_root
+  );
+  let regions = (region VHLO_AnyRegion:$computation);
+  let results = (outs Variadic<VHLO_AnyType>:$results);
 }
 
 def VHLO_CollectivePermuteOpV1 : VHLO_Op<"collective_permute_v1", "0.9.0", "current"> {
@@ -326,7 +359,7 @@ def VHLO_ComplexOpV1 : VHLO_Op<"complex_v1", "0.9.0", "current"> {
   let results = (outs VHLO_AnyType:$result);
 }
 
-def VHLO_CompositeOpV1 : VHLO_Op<"composite_v1", "0.19.0", "current"> {
+def VHLO_CompositeOpV1 : VHLO_Op<"composite_v1", "0.19.0", "1.13.0"> {
   let arguments = (ins
     Variadic<VHLO_AnyType>:$inputs,
     VHLO_AnyAttr:$name,
@@ -334,6 +367,18 @@ def VHLO_CompositeOpV1 : VHLO_Op<"composite_v1", "0.19.0", "current"> {
     VHLO_AnyAttr:$decomposition,
     VHLO_AnyAttr:$version
   );
+  let results = (outs Variadic<VHLO_AnyType>:$results);
+}
+
+def VHLO_CompositeOpV2 : VHLO_Op<"composite_v2", "1.14.0", "current"> {
+  let arguments = (ins
+    Variadic<VHLO_AnyType>:$inputs,
+    VHLO_AnyAttr:$name,
+    VHLO_AnyAttr:$composite_attributes,
+    VHLO_AnyAttr:$decomposition,
+    VHLO_AnyAttr:$version
+  );
+  let regions = (region VariadicRegion<VHLO_AnyRegion>:$composite_regions);
   let results = (outs Variadic<VHLO_AnyType>:$results);
 }
 
@@ -355,7 +400,8 @@ def VHLO_ConvertOpV1 : VHLO_Op<"convert_v1", "0.9.0", "current"> {
   let results = (outs VHLO_AnyType:$result);
 }
 
-def VHLO_ConvolutionOpV1 : VHLO_Op<"convolution_v1", "0.9.0", "current"> {
+def VHLO_ConvolutionOpV1 : VHLO_Op<"convolution_v1", "0.9.0", "current",
+    [DeclareOpInterfaceMethods<VHLO_VersionedOpConstraintInterface>]> {
   let arguments = (ins
     VHLO_AnyType:$lhs,
     VHLO_AnyType:$rhs,
@@ -416,7 +462,7 @@ def VHLO_CrossReplicaSumOpV1 : VHLO_Op<"cross-replica-sum_v1", "0.9.0", "current
 // TODO(#740): output_operand_aliases is not part of the spec.
 // CustomCallOp has proven to be one of the trickiest ops to fully spec.
 // We're aiming to address all these todos by the release of StableHLO v1.0.
-def VHLO_CustomCallOpV1 : VHLO_Op<"custom_call_v1", "0.9.0", "current",
+def VHLO_CustomCallOpV1 : VHLO_Op<"custom_call_v1", "0.9.0", "1.17.0",
     [DeclareOpInterfaceMethods<VHLO_VersionedOpConstraintInterface>]> {
   let arguments = (ins
     Variadic<VHLO_AnyType>:$inputs,
@@ -428,6 +474,22 @@ def VHLO_CustomCallOpV1 : VHLO_Op<"custom_call_v1", "0.9.0", "current",
     VHLO_AnyAttr:$operand_layouts,
     VHLO_AnyAttr:$result_layouts,
     VHLO_AnyAttr:$output_operand_aliases
+  );
+  let results = (outs Variadic<VHLO_AnyType>:$results);
+}
+
+def VHLO_CustomCallOpV2 : VHLO_Op<"custom_call_v2", "1.18.0", "current"> {
+  let arguments = (ins
+    Variadic<VHLO_AnyType>:$inputs,
+    VHLO_AnyAttr:$call_target_name,
+    VHLO_AnyAttr:$has_side_effect,
+    VHLO_AnyAttr:$backend_config,
+    VHLO_AnyAttr:$api_version,
+    VHLO_AnyAttr:$called_computations,
+    VHLO_AnyAttr:$operand_layouts,
+    VHLO_AnyAttr:$result_layouts,
+    VHLO_AnyAttr:$output_operand_aliases,
+    VHLO_AnyAttr:$result_tilings
   );
   let results = (outs Variadic<VHLO_AnyType>:$results);
 }
@@ -521,7 +583,8 @@ def VHLO_DynamicConvOpV1 : VHLO_Op<"dynamic_conv_v1", "0.9.0", "0.19.0"> {
 
 // Padding should be specified as an operand only, not an attribute.
 // Remove `d_padding` and convert `padding` to an operand.
-def VHLO_DynamicConvOpV2 : VHLO_Op<"dynamic_conv_v2", "0.20.0", "current"> {
+def VHLO_DynamicConvOpV2 : VHLO_Op<"dynamic_conv_v2", "0.20.0", "current",
+    [DeclareOpInterfaceMethods<VHLO_VersionedOpConstraintInterface>]> {
   let arguments = (ins
     VHLO_AnyType:$lhs,
     VHLO_AnyType:$rhs,

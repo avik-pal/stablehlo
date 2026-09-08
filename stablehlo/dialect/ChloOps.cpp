@@ -71,7 +71,7 @@ namespace chlo {
   LogicalResult Op::inferReturnTypeComponents(                        \
       MLIRContext* context, std::optional<Location> location,         \
       ValueShapeRange operands, DictionaryAttr attributes,            \
-      OpaqueProperties properties, RegionRange regions,               \
+      PropertyRef properties, RegionRange regions,                    \
       SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {  \
     return inferReturnTypeComponentsFromOperands(                     \
         context, location, operands, attributes, properties, regions, \
@@ -93,6 +93,7 @@ INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(ErfOp)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(ErfcOp)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(ErfInvOp)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(LgammaOp)
+INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(MulhiOp)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(NextAfterOp)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(PolygammaOp)
 INFER_RETURN_TYPE_COMPONENTS_FROM_OPERANDS(SinhOp)
@@ -199,7 +200,7 @@ ShapedTypeComponents getBroadcastTypeWithBroadcastDimensions(
 
 LogicalResult InferBroadcastBinaryOpReturnTypeComponents(
     MLIRContext* context, std::optional<Location> location, ValueRange operands,
-    DictionaryAttr attributes, OpaqueProperties properties,
+    DictionaryAttr attributes, PropertyRef properties,
     std::optional<ArrayRef<int64_t>> broadcastDimensions, Type elementType,
     SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
   // Handle unranked.
@@ -252,8 +253,8 @@ LogicalResult ReifyBroadcastBinaryOpReturnTypeShapes(
 
 LogicalResult BroadcastComplexOp::inferReturnTypeComponents(
     MLIRContext* context, std::optional<Location> location,
-    ValueShapeRange operands, DictionaryAttr attributes,
-    OpaqueProperties properties, RegionRange regions,
+    ValueShapeRange operands, DictionaryAttr attributes, PropertyRef properties,
+    RegionRange regions,
     SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
   ShapedType lhsType = cast<ShapedType>(operands[0].getType());
   Type elementType = ComplexType::get(lhsType.getElementType());
@@ -287,8 +288,8 @@ void BroadcastCompareOp::build(OpBuilder& builder, OperationState& result,
 
 LogicalResult BroadcastCompareOp::inferReturnTypeComponents(
     MLIRContext* context, std::optional<Location> location,
-    ValueShapeRange operands, DictionaryAttr attributes,
-    OpaqueProperties properties, RegionRange regions,
+    ValueShapeRange operands, DictionaryAttr attributes, PropertyRef properties,
+    RegionRange regions,
     SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
   Type elementType = IntegerType::get(context, 1);
   Adaptor adaptor(operands, attributes, properties, regions);
@@ -317,7 +318,7 @@ static Type getIsInfLikeReturnType(Value operand) {
 
 LogicalResult IsInfOp::inferReturnTypes(
     MLIRContext* /*ctx*/, std::optional<Location>, ValueRange operands,
-    DictionaryAttr, OpaqueProperties, RegionRange,
+    DictionaryAttr, PropertyRef, RegionRange,
     SmallVectorImpl<Type>& inferredReturnTypes) {
   inferredReturnTypes.push_back(getIsInfLikeReturnType(operands.front()));
   return success();
@@ -329,7 +330,7 @@ LogicalResult IsInfOp::inferReturnTypes(
 
 LogicalResult IsNegInfOp::inferReturnTypes(
     MLIRContext* /*ctx*/, std::optional<Location>, ValueRange operands,
-    DictionaryAttr, OpaqueProperties, RegionRange,
+    DictionaryAttr, PropertyRef, RegionRange,
     SmallVectorImpl<Type>& inferredReturnTypes) {
   inferredReturnTypes.push_back(getIsInfLikeReturnType(operands.front()));
   return success();
@@ -341,7 +342,7 @@ LogicalResult IsNegInfOp::inferReturnTypes(
 
 LogicalResult IsPosInfOp::inferReturnTypes(
     MLIRContext* /*ctx*/, std::optional<Location>, ValueRange operands,
-    DictionaryAttr, OpaqueProperties, RegionRange,
+    DictionaryAttr, PropertyRef, RegionRange,
     SmallVectorImpl<Type>& inferredReturnTypes) {
   inferredReturnTypes.push_back(getIsInfLikeReturnType(operands.front()));
   return success();
@@ -355,7 +356,7 @@ LogicalResult IsPosInfOp::inferReturnTypes(
   LogicalResult Op::inferReturnTypeComponents(                              \
       MLIRContext* context, std::optional<Location> location,               \
       ValueShapeRange operands, DictionaryAttr attributes,                  \
-      OpaqueProperties properties, RegionRange regions,                     \
+      PropertyRef properties, RegionRange regions,                          \
       SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {        \
     Adaptor adaptor(operands.getValues(), attributes, properties, regions); \
     return InferBroadcastBinaryOpReturnTypeComponents(                      \
@@ -400,8 +401,8 @@ LogicalResult ConstantLikeOp::verify() {
 
 LogicalResult ConstantLikeOp::inferReturnTypeComponents(
     MLIRContext* /*context*/, std::optional<Location> location,
-    ValueShapeRange operands, DictionaryAttr attributes,
-    OpaqueProperties properties, RegionRange /*regions*/,
+    ValueShapeRange operands, DictionaryAttr attributes, PropertyRef properties,
+    RegionRange /*regions*/,
     SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
   ConstantLikeOp::Adaptor op(operands, attributes, properties);
   if (failed(op.verify(location.value()))) return failure();
@@ -437,7 +438,7 @@ OpFoldResult ConstantLikeOp::fold(FoldAdaptor /*adaptor*/) {
 
 LogicalResult BroadcastSelectOp::inferReturnTypeComponents(
     MLIRContext*, std::optional<Location> location, ValueShapeRange operands,
-    DictionaryAttr, OpaqueProperties, RegionRange,
+    DictionaryAttr, PropertyRef, RegionRange,
     SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
   BroadcastSelectOp::Adaptor op(operands.getValues());
   auto onTrueType = cast<ShapedType>(op.getOnTrue().getType());
@@ -751,14 +752,32 @@ LogicalResult RaggedDotOp::verify() {
   return success();
 }
 
+LogicalResult RaggedDotOp::inferReturnTypeComponents(
+    MLIRContext* context, std::optional<Location> location,
+    ValueShapeRange operands, DictionaryAttr attributes, PropertyRef properties,
+    RegionRange regions,
+    SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
+  RaggedDotOp::Adaptor adaptor(operands, attributes, properties, regions);
+  auto raggedDotDimNums = adaptor.getRaggedDotDimensionNumbers();
+  return inferRaggedDotOp(location, adaptor.getLhs(), adaptor.getRhs(),
+                          adaptor.getGroupSizes(),
+                          raggedDotDimNums.getLhsBatchingDimensions(),
+                          raggedDotDimNums.getRhsBatchingDimensions(),
+                          raggedDotDimNums.getLhsContractingDimensions(),
+                          raggedDotDimNums.getRhsContractingDimensions(),
+                          raggedDotDimNums.getLhsRaggedDimensions(),
+                          raggedDotDimNums.getRhsGroupDimensions(),
+                          adaptor.getPrecisionConfig(), inferredReturnShapes);
+}
+
 //===----------------------------------------------------------------------===//
 // TopKOp
 //===----------------------------------------------------------------------===//
 
 LogicalResult TopKOp::inferReturnTypeComponents(
     MLIRContext* context, std::optional<Location> location,
-    ValueShapeRange operands, DictionaryAttr attributes,
-    OpaqueProperties properties, RegionRange regions,
+    ValueShapeRange operands, DictionaryAttr attributes, PropertyRef properties,
+    RegionRange regions,
     SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
   TopKOp::Adaptor adaptor(operands, attributes, properties, regions);
   return hlo::inferTopKOp(location, adaptor.getOperand(), adaptor.getK(),
@@ -773,7 +792,7 @@ OpFoldResult ConstantOp::fold(FoldAdaptor /*adaptor*/) { return getValue(); }
 
 LogicalResult ConstantOp::inferReturnTypes(
     MLIRContext*, std::optional<Location>, ValueRange operands,
-    DictionaryAttr attributes, OpaqueProperties properties, RegionRange regions,
+    DictionaryAttr attributes, PropertyRef properties, RegionRange regions,
     SmallVectorImpl<Type>& inferredReturnTypes) {
   Adaptor adaptor(operands, attributes, properties, regions);
   Type type = cast<TypedAttr>(adaptor.getValueAttr()).getType();
@@ -787,7 +806,7 @@ LogicalResult ConstantOp::inferReturnTypes(
 
 LogicalResult ScanOp::inferReturnTypeComponents(
     MLIRContext*, std::optional<Location> location, ValueShapeRange operands,
-    DictionaryAttr attributes, OpaqueProperties properties, RegionRange regions,
+    DictionaryAttr attributes, PropertyRef properties, RegionRange regions,
     SmallVectorImpl<ShapedTypeComponents>& inferredReturnShapes) {
   ScanOp::Adaptor adaptor(operands, attributes, properties, regions);
   if (regions.empty() || regions.front()->empty()) {
@@ -805,6 +824,9 @@ LogicalResult ScanOp::inferReturnTypeComponents(
   // output dimension size will be dynamic as well.
   int64_t dim = adaptor.getDimension();
   int64_t dimSize = ShapedType::kDynamic;
+  if (adaptor.getScanDimSize().has_value()) {
+    dimSize = adaptor.getScanDimSize().value();
+  }
   for (auto [i, type] : llvm::enumerate(adaptor.getInputs().getTypes())) {
     auto inputType = dyn_cast<RankedTensorType>(type);
     if (!inputType) {
@@ -814,9 +836,8 @@ LogicalResult ScanOp::inferReturnTypeComponents(
       return emitOptionalError(location, "scan dimension of operand ", i,
                                " is out of bounds");
     }
-    dimSize = inputType.getDimSize(dim);
     if (dimSize == ShapedType::kDynamic) {
-      break;
+      dimSize = inputType.getDimSize(dim);
     }
   }
 
@@ -837,45 +858,15 @@ LogicalResult ScanOp::inferReturnTypeComponents(
   return success();
 }
 
-LogicalResult ScanOp::reifyReturnTypeShapes(
-    OpBuilder& builder, ValueRange operands,
-    SmallVectorImpl<Value>& reifiedReturnShapes) {
-  ScanOp::Adaptor adaptor(operands, getOperation()->getAttrDictionary(),
-                          getOperation()->getPropertiesStorage());
-  auto inputs = adaptor.getInputs();
-  size_t k = adaptor.getInits().size();
-  size_t numResults = getOperation()->getNumResults();
-  size_t numOutputs = numResults - k;
-
-  for (size_t i = 0; i < numOutputs; ++i) {
-    size_t inputIdx = i;
-    Value inputVal = (inputIdx < inputs.size()) ? inputs[inputIdx] : inputs[0];
-    if (failed(hlo::deriveShapeFromOperand(&builder, getOperation(), inputVal,
-                                           &reifiedReturnShapes))) {
-      return failure();
-    }
-  }
-
-  for (auto init : adaptor.getInits()) {
-    if (failed(hlo::deriveShapeFromOperand(&builder, getOperation(), init,
-                                           &reifiedReturnShapes))) {
-      return failure();
-    }
-  }
-  return success();
-}
-
 LogicalResult ScanOp::verify() {
-  if (getInits().size() != getCarries().size()) {
-    return emitOpError() << "requires the number of inits ("
-                         << getInits().size() << ") and carries ("
-                         << getCarries().size() << ") to be equal";
+  if (getInputs().empty() && getOutputs().empty()) {
+    return emitOpError() << "at least one of inputs or outputs must be present";
   }
 
   // Check that the scan dimension is in bounds for all operands. Also check
   // that all operands have the same scan dimension size.
   int64_t dim = getDimension();
-  int64_t dimSize = ShapedType::kDynamic;
+  std::optional<uint64_t> dimSize = getScanDimSize();
   for (auto [i, type] : llvm::enumerate(getInputs().getTypes())) {
     auto inputType = dyn_cast<RankedTensorType>(type);
     if (!inputType) {
@@ -888,13 +879,11 @@ LogicalResult ScanOp::verify() {
     if (inputType.isDynamicDim(dim)) {
       continue;
     }
-    dimSize = inputType.getDimSize(dim);
-    if (dimSize != ShapedType::kDynamic &&
-        dimSize != inputType.getDimSize(dim)) {
-      return emitOpError() << "scan dimension size of operand " << i
-                           << " does not match previous operands";
+    uint64_t currentDimSize = inputType.getDimSize(dim);
+    if (dimSize.has_value() && dimSize.value() != currentDimSize) {
+      return emitOpError() << "invalid scan dimension size of operand " << i;
     }
-    dimSize = inputType.getDimSize(dim);
+    dimSize = currentDimSize;
   }
 
   Block& bodyBlock = getBody().front();
@@ -938,20 +927,22 @@ ParseResult ScanOp::parse(OpAsmParser& parser, OperationState& result) {
       parser.parseKeyword("inits") ||
       parser.parseOperandList(inits, OpAsmParser::Delimiter::Paren) ||
       parser.parseKeyword("dimension") || parser.parseEqual() ||
-      parser.parseInteger(dimension) || parser.parseRegion(*body) ||
-      parser.parseOptionalAttrDict(result.attributes) ||
-      parser.parseColonType(funcType)) {
+      parser.parseInteger(dimension) ||
+      parser.parseOptionalAttrDictWithKeyword(result.attributes) ||
+      parser.parseRegion(*body) || parser.parseColonType(funcType)) {
     return failure();
   }
 
-  size_t numInputs = inputs.size();
-  size_t numCarries = inits.size();
-  if (funcType.getInputs().size() != numInputs + numCarries) {
+  int32_t numInputs = inputs.size();
+  int32_t numCarries = inits.size();
+  int32_t numOutputs = funcType.getNumResults() - numCarries;
+  if (static_cast<int64_t>(funcType.getInputs().size()) !=
+      static_cast<int64_t>(numInputs + numCarries)) {
     return parser.emitError(
         parser.getNameLoc(),
         "operand types must match the number of inputs and inits");
   }
-  if (funcType.getResults().size() < numCarries) {
+  if (numOutputs < 0) {
     return parser.emitError(
         parser.getNameLoc(),
         "not enough result types to cover the required carries");
@@ -970,13 +961,10 @@ ParseResult ScanOp::parse(OpAsmParser& parser, OperationState& result) {
   Builder& builder = parser.getBuilder();
   result.addAttribute(ScanOp::getDimensionAttrName(result.name),
                       builder.getI64IntegerAttr(dimension));
-  result.addAttribute(
-      ScanOp::getOperandSegmentSizeAttr(),
-      builder.getDenseI32ArrayAttr({(int32_t)numInputs, (int32_t)numCarries}));
-  size_t numOutputs = funcType.getNumResults() - numCarries;
-  result.addAttribute(
-      ScanOp::getResultSegmentSizeAttr(),
-      builder.getDenseI32ArrayAttr({(int32_t)numOutputs, (int32_t)numCarries}));
+  result.addAttribute(ScanOp::getOperandSegmentSizeAttr(),
+                      builder.getDenseI32ArrayAttr({numInputs, numCarries}));
+  result.addAttribute(ScanOp::getResultSegmentSizeAttr(),
+                      builder.getDenseI32ArrayAttr({numOutputs, numCarries}));
 
   return success();
 }
@@ -987,10 +975,12 @@ void ScanOp::print(OpAsmPrinter& p) {
   p << ") inits (";
   p.printOperands(getInits());
   p << ") dimension=" << getDimension() << " ";
+  p.printOptionalAttrDictWithKeyword(
+      getOperation()->getAttrs(),
+      /*elidedAttrs=*/{"dimension", "operandSegmentSizes",
+                       "resultSegmentSizes"});
+  p << " ";
   p.printRegion(getBody(), /*printEntryBlockArgs=*/true);
-  p.printOptionalAttrDict(getOperation()->getAttrs(),
-                          /*elidedAttrs=*/{"dimension", "operandSegmentSizes",
-                                           "resultSegmentSizes"});
   p << " : ";
   p.printFunctionalType(*this);
 }

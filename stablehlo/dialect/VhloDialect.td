@@ -52,11 +52,17 @@ def VHLO_Dialect : Dialect {
       1.11.0: Allow (de)serializing VHLO programs mixed with potentially unstable dialects.
       1.12.0: Add `source_target_pairs` attribute to `send` and `recv` ops.
       1.13.0: Extend `custom_call` op to support `buffer` types.
+      1.14.0: Introduce `composite` op with regions.
+      1.15.0: Introduce `async_start` and `async_done` ops and `future` types.
+      1.16.0: Add mesh based replica groups to collective ops.
+      1.17.0: Add `future` type support to `custom_call` op.
+      1.18.0: Add `result_tilings` attribute to `custom_call` op.
+      1.19.0: Add CollectiveReduceOp.
+      1.20.0: Add has_dynamic_root to collective_broadcast op. Allow mixed fp8 operands in `convolution` and `dynamic_conv` ops.
   }];
 
   let useDefaultAttributePrinterParser = 0;
   let useDefaultTypePrinterParser = 0;
-  let usePropertiesForAttributes = 1;
 }
 
 #endif  // STABLEHLO_DIALECT_VHLO_DIALECT

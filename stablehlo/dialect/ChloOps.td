@@ -859,7 +859,8 @@ def CHLO_RaggedDotDimensionNumbers : AttrDef<CHLO_Dialect, "RaggedDotDimensionNu
   let hasCustomAssemblyFormat = 1;
 }
 
-def CHLO_RaggedDotOp : CHLO_Op<"ragged_dot", [Pure]> {
+def CHLO_RaggedDotOp : CHLO_Op<"ragged_dot", [Pure,
+    DeclareOpInterfaceMethods<InferShapedTypeOpInterface, ["inferReturnTypeComponents"]>]> {
   string summary = "Computes a matmul over a single ragged dimension";
 
   string description = [{
@@ -916,13 +917,16 @@ def CHLO_TopKOp : CHLO_Op<"top_k",
     values.shape = indices.shape = input.shape[:-1] + [k]
     ```
 
-    If two elements are equal, the lower-index element appears first.
+    If `is_stable` is true, the sort is stable: if two elements are equal, the
+    lower-index element appears first. If false, the relative order of equal
+    elements is implementation-defined.
   }];
 
   let arguments = (ins
     Arg<HLO_AnyTensor, [{1-D or higher with last dimension at least `k`.}]>:$operand,
     Arg<I64Attr, [{0-D.  Number of top elements to look for along the last dimension (along each
-row for matrices).}]>:$k
+row for matrices).}]>:$k,
+    DefaultValuedOptionalAttr<BoolAttr, "true">:$is_stable
   );
 
   let results = (outs
@@ -930,7 +934,7 @@ row for matrices).}]>:$k
     HLO_AnyTensor:$indices);
 
   let assemblyFormat = [{
-    `(`$operand `,` `k` `=` $k`)` attr-dict `:`
+    `(`$operand `,` `k` `=` $k (`,` `is_stable` `=` $is_stable^)? `)` attr-dict `:`
     type($operand) `->` `(`type($values)`,` type($indices)`)`
   }];
 }
@@ -938,7 +942,7 @@ row for matrices).}]>:$k
 def CHLO_ScanOp : CHLO_Op<"scan", [
       AttrSizedOperandSegments,
       AttrSizedResultSegments,
-      InferTensorTypeWithReify,
+      InferTensorType,
       IsolatedFromAbove,
       OpAsmOpInterface,
       RecursiveMemoryEffects,
@@ -961,6 +965,7 @@ def CHLO_ScanOp : CHLO_Op<"scan", [
     Variadic<HLO_AnyTensor>:$inputs,
     Variadic<HLO_AnyTensor>:$inits,
     ConfinedAttr<I64Attr, [IntNonNegative]>:$dimension,
+    OptionalAttr<ConfinedAttr<I64Attr, [IntNonNegative]>>:$scan_dim_size,
     DefaultValuedOptionalAttr<BoolAttr, "false">:$is_reverse,
     OptionalAttr<BoolAttr>:$is_associative
   );
@@ -978,10 +983,34 @@ def CHLO_ScanOp : CHLO_Op<"scan", [
         setNameFn(region.getArgument(i), i < getInputs().size() ? "input" : "carry");
       }
     }
+    static bool isCompatibleReturnTypes(TypeRange l, TypeRange r) {
+      return succeeded(mlir::verifyCompatibleShapes(l, r));
+    }
   }];
 
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
+}
+
+
+def CHLO_MulhiOp : CHLO_Op<"mulhi", [Commutative, Pure,
+    HLO_CompatibleOperandsAndResultType]> {
+  let summary = "Mulhi operation";
+  let description = [{
+    Performs element-wise multiplication of two N-bit integer tensors
+    `lhs` and `rhs`, returning a N-bit integer `result` tensor containing
+    the most significant N bits of the upcasted (N+N-bit) product.
+
+    $$
+    \text{mulhi}(x, y) = \text{downcast}((\text{upcast}(x) * \text{upcast}(y)) >> N)
+    $$
+  }];
+  let arguments = (ins HLO_IntTensor:$lhs, HLO_IntTensor:$rhs);
+  let results = (outs HLO_IntTensor:$result);
+
+  let assemblyFormat = [{
+    $lhs `,` $rhs attr-dict `:` type($lhs) `,` type($rhs) `->` type($result)
+  }];
 }
 
 #endif  // STABLEHLO_DIALECT_CHLO_OPS

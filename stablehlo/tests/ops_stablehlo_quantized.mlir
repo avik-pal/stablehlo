@@ -437,7 +437,7 @@ func.func @negative_cholesky_quantization(%arg0: tensor<1x2x2x!quant.uniform<i8:
 // -----
 
 func.func @negative_clamp_quantization(%arg0: tensor<1x!quant.uniform<ui8:f32:0, {0.1:-30}>>) -> tensor<1x!quant.uniform<ui8:f32:0, {0.1:-30}>> {
-  // expected-error-re@+1 {{operand #0 must be ranked tensor of {{.*}}, but got 'tensor<1x!quant.uniform<u8:f32:0, {1.000000e-01:-30}>>'}}
+  // expected-error-re@+1 {{operand #0 must be ranked tensor of {{.*}}, but got 'tensor<1x!quant.uniform<ui8:f32:0, {1.000000e-01:-30}>>'}}
   %0 = "stablehlo.clamp"(%arg0, %arg0, %arg0) : (tensor<1x!quant.uniform<ui8:f32:0, {0.1:-30}>>, tensor<1x!quant.uniform<ui8:f32:0, {0.1:-30}>>, tensor<1x!quant.uniform<ui8:f32:0, {0.1:-30}>>) -> tensor<1x!quant.uniform<ui8:f32:0, {0.1:-30}>>
   func.return %0: tensor<1x!quant.uniform<ui8:f32:0, {0.1:-30}>>
 }
@@ -726,7 +726,7 @@ func.func @negative_dot_general_quantization(%arg0: tensor<2x3x4x!quant.uniform<
 
 // -----
 
-func.func @negative_dynamic_update_slice_pertensor_quantization(%operand: tensor<3x4x!quant.uniform<i8:f32:0, {0.1:-30}>>, %update: tensor<1x4x!quant.uniform<i8:f32:0, {0.1:-30}>>, %start_indices0: tensor<i64>, %start_indices1: tensor<i64>) -> tensor<3x4x!quant.uniform<i8:f32, 1.0:17>> {
+func.func @negative_dynamic_update_slice_pertensor_quantization(%operand: tensor<3x4x!quant.uniform<i8:f32:0, {0.1:-30}>>, %update: tensor<1x4x!quant.uniform<i8:f32:0, {0.1:-30}>>, %start_indices0: tensor<i64>, %start_indices1: tensor<i64>) -> tensor<3x4x!quant.uniform<i8:f32:0, {0.1:-30}>> {
   // expected-error-re@+1 {{operand #0 must be ranked tensor of {{.*}}, but got 'tensor<3x4x!quant.uniform<i8:f32:0, {1.000000e-01:-30}>>'}}
   %0 = "stablehlo.dynamic_update_slice"(%operand, %update, %start_indices0, %start_indices1) : (tensor<3x4x!quant.uniform<i8:f32:0, {0.1:-30}>>, tensor<1x4x!quant.uniform<i8:f32:0, {0.1:-30}>>, tensor<i64>, tensor<i64>) -> tensor<3x4x!quant.uniform<i8:f32:0, {0.1:-30}>>
   func.return %0 : tensor<3x4x!quant.uniform<i8:f32:0, {0.1:-30}>>
@@ -888,7 +888,7 @@ func.func @negative_select_and_scatter_quantization(%arg0: tensor<10x24x24x64x!q
 // -----
 
 func.func @illegal_storage_type_for_quantized_element_type(%arg0: tensor<4x!quant.uniform<si8:f32, 1.000000e+00>>) -> tensor<4xf32> {
-  // expected-error-re@+1 {{operand #0 must be ranked tensor of {{.*}}, but got 'tensor<4x!quant.uniform<i8:f32, 1.000000e+00>>}}
+  // expected-error-re@+1 {{operand #0 must be ranked tensor of {{.*}}, but got 'tensor<4x!quant.uniform<si8:f32, 1.000000e+00>>}}
   %0 = "stablehlo.uniform_dequantize"(%arg0) : (tensor<4x!quant.uniform<si8:f32, 1.000000e+00>>) -> tensor<4xf32>
   func.return %0 : tensor<4xf32>
 }
@@ -1198,7 +1198,7 @@ func.func @dot_general_c15_per_axis(
 
 func.func @dot_general_c16(
   %arg0: tensor<2x3x4x!quant.uniform<i8:f32, 1.0:17>>,
-  %arg1: tensor<2x3x5x!quant.uniform<i8:f32:0, {0.1:0, 0.1:0}>>) -> tensor<2x4x5x!quant.uniform<i8:f32:0, {0.1:-30, 0.1:-30, 0.1:-30}>> {
+  %arg1: tensor<2x3x5x!quant.uniform<i8:f32:0, {0.1:0, 0.1:0}>>) -> tensor<3x4x5x!quant.uniform<i8:f32:0, {0.1:-30, 0.1:-30, 0.1:-30}>> {
   // expected-error@+1 {{Quantization dimension of rhs should not be in the contracting dimension of rhs}}
   %0 = "stablehlo.dot_general"(%arg0, %arg1) {
     dot_dimension_numbers = #stablehlo.dot<

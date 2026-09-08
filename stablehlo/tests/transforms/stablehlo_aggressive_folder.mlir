@@ -1,6 +1,64 @@
 // RUN: stablehlo-opt --stablehlo-aggressive-folder=fold-op-element-limit=100 --split-input-file --verify-diagnostics %s | FileCheck %s
 
 ////////
+// ReverseOp
+
+// CHECK-LABEL: @reverse_fold_empty_dim_cst
+func.func @reverse_fold_empty_dim_cst() -> tensor<2xi32> {
+  // CHECK: stablehlo.constant dense<[1, 2]>
+  // CHECK-NEXT: stablehlo.reverse
+  %operand = stablehlo.constant dense<[1, 2]> : tensor<2xi32>
+  %result = stablehlo.reverse %operand, dims = [] : tensor<2xi32>
+  return %result : tensor<2xi32>
+}
+
+// -----
+
+// CHECK-LABEL: @reverse_fold_single_dim_cst
+func.func @reverse_fold_single_dim_cst() -> tensor<2xi32> {
+  // CHECK: stablehlo.constant dense<[2, 1]>
+  // CHECK-NOT: stablehlo.reverse
+  %operand = stablehlo.constant dense<[1, 2]> : tensor<2xi32>
+  %result = stablehlo.reverse %operand, dims = [0] : tensor<2xi32>
+  return %result : tensor<2xi32>
+}
+
+// -----
+
+// CHECK-LABEL: @reverse_fold_multiple_dim_cst
+func.func @reverse_fold_multiple_dim_cst() -> tensor<3x2xf32> {
+  // CHECK: stablehlo.constant dense<{{\[\[6\.0.*, 5\.0.*\], \[4\.0.*, 3\.0.*\], \[2\.0.*, 1\.0.*\]\]}}> : tensor<3x2xf32>
+  // CHECK-NOT: stablehlo.reverse
+  %operand = stablehlo.constant dense<[[1.0, 2.0],[3.0, 4.0],[5.0, 6.0]]> : tensor<3x2xf32>
+  %result = stablehlo.reverse %operand, dims = [0, 1] : (tensor<3x2xf32>) -> tensor<3x2xf32>
+  return %result : tensor<3x2xf32>
+}
+
+// -----
+
+// CHECK-LABEL: @reverse_fold_one_dim_cst
+func.func @reverse_fold_one_dim_cst() -> tensor<1x2xi32> {
+  // CHECK: stablehlo.constant dense<{{\[\[1, 2\]\]}}>
+  // CHECK-NEXT: stablehlo.reverse
+  %operand = stablehlo.constant dense<[[1,2]]> : tensor<1x2xi32>
+  %result = stablehlo.reverse %operand, dims = [0] : tensor<1x2xi32>
+  return %result : tensor<1x2xi32>
+}
+
+// -----
+
+// CHECK-LABEL: @reverse_fold_splat_cst
+func.func @reverse_fold_splat_cst() -> tensor<3x2xi32> {
+  // CHECK: stablehlo.constant dense<1> : tensor<3x2xi32>
+  // CHECK-NEXT: stablehlo.reverse
+  %operand = stablehlo.constant dense<1> : tensor<3x2xi32>
+  %result = stablehlo.reverse %operand, dims = [0] : tensor<3x2xi32>
+  return %result : tensor<3x2xi32>
+}
+
+// -----
+
+////////
 // AddOp
 
 // CHECK-LABEL: @add_fold_cst
@@ -604,6 +662,39 @@ func.func @div_fold_cst_nan() -> (tensor<f32>) {
   // CHECK: stablehlo.constant dense<0x7FC00000> : tensor<f32>
   // CHECK-NOT: stablehlo.divide
   return %0 : tensor<f32>
+}
+
+// -----
+
+// Integer division by a zero constant must not be folded (it would crash the
+// folder with a divide-by-zero); the op is left in place.
+// CHECK-LABEL: @div_no_fold_int_zero
+func.func @div_no_fold_int_zero() -> (tensor<i32>, tensor<ui32>) {
+  %cst = stablehlo.constant dense<6> : tensor<i32>
+  %cst_0 = stablehlo.constant dense<0> : tensor<i32>
+  %cst_u = stablehlo.constant dense<6> : tensor<ui32>
+  %cst_u0 = stablehlo.constant dense<0> : tensor<ui32>
+  // CHECK: stablehlo.divide
+  // CHECK: stablehlo.divide
+  %0 = stablehlo.divide %cst, %cst_0 : tensor<i32>
+  %1 = stablehlo.divide %cst_u, %cst_u0 : tensor<ui32>
+  return %0, %1 : tensor<i32>, tensor<ui32>
+}
+
+// -----
+
+// Integer remainder by a zero constant must not be folded.
+// CHECK-LABEL: @rem_no_fold_int_zero
+func.func @rem_no_fold_int_zero() -> (tensor<i32>, tensor<ui32>) {
+  %cst = stablehlo.constant dense<6> : tensor<i32>
+  %cst_0 = stablehlo.constant dense<0> : tensor<i32>
+  %cst_u = stablehlo.constant dense<6> : tensor<ui32>
+  %cst_u0 = stablehlo.constant dense<0> : tensor<ui32>
+  // CHECK: stablehlo.remainder
+  // CHECK: stablehlo.remainder
+  %0 = stablehlo.remainder %cst, %cst_0 : tensor<i32>
+  %1 = stablehlo.remainder %cst_u, %cst_u0 : tensor<ui32>
+  return %0, %1 : tensor<i32>, tensor<ui32>
 }
 
 // -----
@@ -1410,4 +1501,41 @@ func.func @dce_while_false_condition() -> tensor<i64> {
     stablehlo.return %2 : tensor<i64>
   }
   return %1 : tensor<i64>
+}
+
+////////
+// XorOp
+
+// CHECK-LABEL: @xor_fold_splat_cst
+func.func @xor_fold_splat_cst() -> tensor<3x2xi32> {
+  // CHECK: stablehlo.constant dense<1> : tensor<3x2xi32>
+  // CHECK-NOT: stablehlo.xor
+  %operand_1 = stablehlo.constant dense<1> : tensor<3x2xi32>
+  %operand_2 = stablehlo.constant dense<0> : tensor<3x2xi32>
+  %result = stablehlo.xor %operand_1, %operand_2 : tensor<3x2xi32>
+  return %result : tensor<3x2xi32>
+}
+
+// -----
+
+// CHECK-LABEL: @xor_fold_cst
+func.func @xor_fold_cst() -> tensor<3xi32> {
+  // CHECK: stablehlo.constant dense<[0, 0, 3]> : tensor<3xi32>
+  // CHECK-NOT: stablehlo.xor
+  %operand_1 = stablehlo.constant dense<[1, 2, 1]> : tensor<3xi32>
+  %operand_2 = stablehlo.constant dense<[1, 2, 2]> : tensor<3xi32>
+  %result = stablehlo.xor %operand_1, %operand_2 : tensor<3xi32>
+  return %result : tensor<3xi32>
+}
+
+// -----
+
+// CHECK-LABEL: @xor_fold_boolean_cst
+func.func @xor_fold_boolean_cst() -> tensor<4xi1> {
+  // CHECK: stablehlo.constant dense<[true, false, true, false]> : tensor<4xi1>
+  // CHECK-NOT: stablehlo.xor
+  %operand_1 = stablehlo.constant dense<[true, true, false, false]> : tensor<4xi1>
+  %operand_2 = stablehlo.constant dense<[false, true, true, false]> : tensor<4xi1>
+  %result = stablehlo.xor %operand_1, %operand_2 : tensor<4xi1>
+  return %result : tensor<4xi1>
 }

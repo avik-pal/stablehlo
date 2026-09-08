@@ -56,9 +56,9 @@ include "stablehlo/dialect/StablehloEnums.td"
 include "stablehlo/dialect/StablehloAttrs.td"
 include "stablehlo/dialect/StablehloTypes.td"
 
-class StableHLO_ShapedInterfaceOp<string mnemonic, list<Trait> traits> :
+class StableHLO_ShapedInterfaceOp<string mnemonic, list<Trait> traits, list<string> extraMethodOverrides = []> :
     StableHLO_Op<mnemonic, traits # [DeclareOpInterfaceMethods<InferShapedTypeOpInterface,
-    ["reifyReturnTypeShapes"]>]> {}
+    ["reifyReturnTypeShapes"] # extraMethodOverrides>]> {}
 
 class StableHLO_ResourceBase<string resourceKind> :
     Resource<!strconcat("::mlir::stablehlo::side_effects::", resourceKind)> {}
@@ -850,7 +850,7 @@ def StableHLO_AddOp : StableHLO_BinaryElementwiseOp<"add", [HLO_Commutative,
     static LogicalResult inferReturnTypes(
         MLIRContext * /*context*/, std::optional<Location> location,
         ValueRange operands, DictionaryAttr /*attributes*/,
-        OpaqueProperties /*properties*/, RegionRange /*regions*/,
+        PropertyRef /*properties*/, RegionRange /*regions*/,
         SmallVectorImpl<Type> &inferredReturnTypes) {
       if (operands.empty())
         return emitOptionalError(
@@ -1479,9 +1479,14 @@ def StableHLO_WhileOp: StableHLO_Op<"while", [
   let hasCustomAssemblyFormat = 1;
 }
 
+def StableHLO_ReplicaGroups : AnyAttrOf<[I64ElementsAttr, StableHLO_ReplicaGroupMeshAxes]> {
+  let description = "Attribute that models the replica groups (either tensor or ReplicaGroupMeshAxes)";
+}
+
 def StableHLO_AllGatherOp : StableHLO_Op<"all_gather",
     [ConditionallySpeculatable,
-     HLO_PairwiseSameOperandAndResultElementType, /*all_gather_c6*/]> {
+     HLO_PairwiseSameOperandAndResultElementType /*all_gather_c6*/,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   string summary = "AllGather operation";
   string description = [{
     Within each process group in the process grid, concatenates the values of the
@@ -1495,7 +1500,8 @@ def StableHLO_AllGatherOp : StableHLO_Op<"all_gather",
     ```mlir
     %result:2 = "stablehlo.all_gather"(%operand0, %operand1) {
       all_gather_dim = 1 : i64,
-      replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>,
+      replica_groups = #stablehlo.replica_group_mesh_axes<
+        mesh = #stablehlo.mesh<axes = [#stablehlo.mesh_axis<name = "foo", size = 2>]>, axes = ["foo"]>,
       channel_handle = #stablehlo.channel_handle<handle = 0, type = 0>
     } : (tensor<2x2xi64>, tensor<2x2xi64>) -> (tensor<2x4xi64>, tensor<2x4xi64>)
     ```
@@ -1504,7 +1510,7 @@ def StableHLO_AllGatherOp : StableHLO_Op<"all_gather",
   let arguments = (ins
     Variadic<HLO_Tensor>:$operands, /*all_gather_i1*/
     ConfinedAttr<I64Attr, [IntNonNegative]>:$all_gather_dim, /*all_gather_c1, all_gather_i2*/
-    I64ElementsAttr:$replica_groups, /*all_gather_i3*/
+    StableHLO_ReplicaGroups:$replica_groups, /*all_gather_i3*/
     OptionalAttr<StableHLO_ChannelHandle>:$channel_handle, /*all_gather_i4*/
     UnitAttr:$use_global_device_ids /*all_gather_i5*/
   );
@@ -1520,7 +1526,8 @@ def StableHLO_AllGatherOp : StableHLO_Op<"all_gather",
 def StableHLO_AllReduceOp : StableHLO_Op<"all_reduce",
     [HLO_SpeculatableIfStaticDimInOutputIsStaticInInput,
      InferTensorType /*all_reduce_c6, all_reduce_c7*/,
-     SingleBlockImplicitTerminator<"ReturnOp">]> {
+     SingleBlockImplicitTerminator<"ReturnOp">,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "AllReduce operation";
   let description = [{
     Within each process group in the process grid, applies a reduction function
@@ -1537,7 +1544,9 @@ def StableHLO_AllReduceOp : StableHLO_Op<"all_reduce",
       %0 = "stablehlo.add"(%arg0, %arg1) : (tensor<i64>, tensor<i64>) -> tensor<i64>
       "stablehlo.return"(%0) : (tensor<i64>) -> ()
     }) {
-      replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>,
+      replica_groups = #stablehlo.replica_group_mesh_axes<
+        mesh = #stablehlo.mesh<axes = [#stablehlo.mesh_axis<name = "foo", size = 2>]>, axes = ["foo"]
+      >,
       channel_handle = #stablehlo.channel_handle<handle = 0, type = 0>
     } : (tensor<4xi64>, tensor<4xi64>) -> (tensor<4xi64>, tensor<4xi64>)
     ```
@@ -1545,7 +1554,7 @@ def StableHLO_AllReduceOp : StableHLO_Op<"all_reduce",
 
   let arguments = (ins
     Variadic<HLO_Tensor>:$operands, /*all_reduce_i1*/
-    I64ElementsAttr:$replica_groups, /*all_reduce_i2*/
+    StableHLO_ReplicaGroups:$replica_groups, /*all_reduce_i2*/
     OptionalAttr<StableHLO_ChannelHandle>:$channel_handle, /*all_reduce_i3*/
     UnitAttr:$use_global_device_ids /*all_reduce_i4*/
   );
@@ -1555,13 +1564,14 @@ def StableHLO_AllReduceOp : StableHLO_Op<"all_reduce",
   let builders = [
     OpBuilder<(ins
       "::mlir::Type":$result_type, "::mlir::Value":$operand,
-      "::mlir::DenseIntElementsAttr":$replica_groups,
+      "::mlir::Attribute":$replica_groups,
       "::mlir::stablehlo::ChannelHandleAttr":$channel_handle,
       CArg<"bool", "false">:$use_global_device_ids)>,
  ];
 }
 
-def StableHLO_ReduceScatterOp : StableHLO_Op<"reduce_scatter", [ConditionallySpeculatable]> {
+def StableHLO_ReduceScatterOp : StableHLO_Op<"reduce_scatter",
+    [ConditionallySpeculatable, DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "ReduceScatter operation";
   let description = [{
      Within each process group in the process grid, performs reduction, using
@@ -1580,7 +1590,9 @@ def StableHLO_ReduceScatterOp : StableHLO_Op<"reduce_scatter", [ConditionallySpe
       stablehlo.return %0 : tensor<i64>
     }) {
       scatter_dimension = 1 : i64,
-      replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>,
+      replica_groups = #stablehlo.replica_group_mesh_axes<
+        mesh = #stablehlo.mesh<axes = [#stablehlo.mesh_axis<name = "foo", size = 2>]>, axes = ["foo"]
+      >,
       channel_handle = #stablehlo.channel_handle<handle = 0, type = 0>
     } : (tensor<2x4xi64>) -> tensor<2x2xi64>
     ```
@@ -1589,7 +1601,7 @@ def StableHLO_ReduceScatterOp : StableHLO_Op<"reduce_scatter", [ConditionallySpe
   let arguments = (ins
     HLO_Tensor:$operand, /*reduce_scatter_i1*/
     ConfinedAttr<I64Attr, [IntNonNegative]>:$scatter_dimension, /*reduce_scatter_c2, reduce_scatter_i2*/
-    I64ElementsAttr:$replica_groups, /*reduce_scatter_i3*/
+    StableHLO_ReplicaGroups:$replica_groups, /*reduce_scatter_i3*/
     OptionalAttr<StableHLO_ChannelHandle>:$channel_handle, /*reduce_scatter_i4*/
     UnitAttr:$use_global_device_ids /*reduce_scatter_i5*/
   );
@@ -1606,7 +1618,8 @@ def StableHLO_ReduceScatterOp : StableHLO_Op<"reduce_scatter", [ConditionallySpe
 def StableHLO_AllToAllOp : StableHLO_Op<"all_to_all",
     [ConditionallySpeculatable,
      HLO_PairwiseSameOperandAndResultElementType /*all_to_all_c9*/,
-     InferTensorType /*all_to_all_c9*/]> {
+     InferTensorType /*all_to_all_c9*/,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "AllToAll operation";
   let description = [{
     Within each process group in the process grid, splits the values of the
@@ -1623,7 +1636,9 @@ def StableHLO_AllToAllOp : StableHLO_Op<"all_to_all",
       split_dimension = 1 : i64,
       concat_dimension = 0 : i64,
       split_count = 2 : i64,
-      replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>
+      replica_groups = #stablehlo.replica_group_mesh_axes<
+        mesh = #stablehlo.mesh<axes = [#stablehlo.mesh_axis<name = "foo", size = 2>]>, axes = ["foo"]
+      >
     } : (tensor<2x4xi64>, tensor<2x4xi64>) -> (tensor<4x2xi64>, tensor<4x2xi64>)
     ```
   }];
@@ -1633,7 +1648,7 @@ def StableHLO_AllToAllOp : StableHLO_Op<"all_to_all",
     ConfinedAttr<I64Attr, [IntNonNegative]>:$split_dimension, /*all_to_all_c1, all_to_all_i2*/
     ConfinedAttr<I64Attr, [IntNonNegative]>:$concat_dimension, /*all_to_all_c3, all_to_all_i3*/
     ConfinedAttr<I64Attr, [IntPositive]>:$split_count, /*all_to_all_c4, all_to_all_i4*/
-    I64ElementsAttr:$replica_groups, /*all_to_all_i5*/
+    StableHLO_ReplicaGroups:$replica_groups, /*all_to_all_i5*/
     OptionalAttr<StableHLO_ChannelHandle>:$channel_handle /*all_to_all_i6*/
   );
   let results = (outs Variadic<HLO_Tensor>);
@@ -1646,7 +1661,7 @@ def StableHLO_AllToAllOp : StableHLO_Op<"all_to_all",
       "::mlir::IntegerAttr": $split_dimension,
       "::mlir::IntegerAttr": $concat_dimension,
       "::mlir::IntegerAttr": $split_count,
-      "::mlir::DenseIntElementsAttr": $replica_groups)>];
+      "::mlir::Attribute": $replica_groups)>];
 
   let extraClassDeclaration = commonClassDeclaration # [{
     /// Interface method for ConditionallySpeculatable.
@@ -1701,6 +1716,63 @@ def StableHLO_ReduceOp: StableHLO_ShapedInterfaceOp<"reduce", [
 
   let hasVerifier = 1;
 
+}
+
+//===----------------------------------------------------------------------===//
+// StableHLO async op definitions.
+//===----------------------------------------------------------------------===//
+
+def StableHLO_AsyncStartOp : StableHLO_Op<"async_start",
+    [SingleBlockImplicitTerminator<"ReturnOp">,
+     HLO_RecursivelySpeculatableIfAllInputsStatic,
+     IsolatedFromAbove,
+     DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let summary = "AsyncStart operation";
+  let description = [{
+    Starts an asynchronous execution of an operation.
+
+    See:
+    https://github.com/openxla/stablehlo/blob/main/docs/spec.md#async_start
+
+    Example:
+    ```mlir
+    %0 = "stablehlo.async_start"(%arg0) ({
+      %1 = "stablehlo.all_gather"(%arg0) {
+        all_gather_dim = 1 : i64,
+        replica_groups = dense<[[0, 2, 4, 6], [1, 3, 5, 7]]> : tensor<2x4xi64>
+      } : (tensor<8x2xf32>) -> tensor<8x8xf32>
+      "stablehlo.return"(%1) : (tensor<8x8xf32>) -> ()
+    }) : (tensor<8x2xf32>) -> !stablehlo.future<tensor<8x8xf32>>
+    ```
+  }];
+  let arguments = (ins Variadic<HLO_Tensor>:$operands);
+  let regions = (region SizedRegion<1>:$body);
+  let results = (outs HLO_Future);
+}
+
+def StableHLO_AsyncDoneOp : StableHLO_Op<"async_done",
+    [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+  let summary = "AsyncDone operation";
+  let description = [{
+    Waits for the completion of an asynchronous execution of an operation.
+
+    See:
+    https://github.com/openxla/stablehlo/blob/main/docs/spec.md#async_done
+
+    Example:
+    ```mlir
+    %0 = "stablehlo.async_start"(%arg0) ({
+      %1 = "stablehlo.all_gather"(%arg0) {
+        all_gather_dim = 1 : i64,
+        replica_groups = dense<[[0, 2, 4, 6], [1, 3, 5, 7]]> : tensor<2x4xi64>
+      } : (tensor<8x2xf32>) -> tensor<8x8xf32>
+      "stablehlo.return"(%1) : (tensor<8x8xf32>) -> ()
+    }) : (tensor<8x2xf32>) -> !stablehlo.future<tensor<8x8xf32>>
+    %2 = "stablehlo.async_done"(%0) : (!stablehlo.future<tensor<8x8xf32>>) -> tensor<8x8xf32>
+    ```
+  }];
+  let arguments = (ins HLO_Future:$operand);
+  let results = (outs HLO_Tensor);
 }
 
 //===----------------------------------------------------------------------===//
@@ -2280,9 +2352,9 @@ def StableHLO_ConcatenateOp : StableHLO_ShapedInterfaceOp<"concatenate",
 
 def StableHLO_CollectiveBroadcastOp: StableHLO_Op<"collective_broadcast",
     [HLO_SpeculatableIfStaticDimInOutputIsStaticInInput,
-     SameOperandsAndResultElementType /*collective_broadcast_c3*/,
      DeclareOpInterfaceMethods<InferTypeOpInterface>,
-     DeclareOpInterfaceMethods<InferShapedTypeOpInterface, ["inferReturnTypeComponents"]>
+     DeclareOpInterfaceMethods<InferShapedTypeOpInterface, ["inferReturnTypeComponents"]>,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>
     ]> {
   let summary = "CollectiveBroadcast operation";
   let description = [{
@@ -2290,31 +2362,81 @@ def StableHLO_CollectiveBroadcastOp: StableHLO_Op<"collective_broadcast",
     `operand` tensor from the source process to the target processes and produce a
     `result` tensor.
 
+    When `has_dynamic_root` is false (default), the root is the 0-th rank in
+    each replica group. When `has_dynamic_root` is true, the last operand is a
+    rank-1 i32 tensor specifying per-operand root indices within each group.
+
     See:
     https://github.com/openxla/stablehlo/blob/main/docs/spec.md#collective_broadcast
 
     Example:
     ```mlir
     %result = "stablehlo.collective_broadcast"(%operand) {
-      replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>,
+      replica_groups = #stablehlo.replica_group_mesh_axes<
+        mesh = #stablehlo.mesh<axes = [#stablehlo.mesh_axis<name = "foo", size = 2>]>, axes = ["foo"]
+      >,
       channel_handle = #stablehlo.channel_handle<handle = 0, type = 0>
     } : (tensor<1x2xi64>) -> tensor<1x2xi64>
     ```
   }];
 
   let arguments = (ins
-    HLO_Tensor:$operand, /*collective_broadcast_i1*/
-    I64ElementsAttr:$replica_groups, /*collective_broadcast_i2*/
-    OptionalAttr<StableHLO_ChannelHandle>:$channel_handle /*collective_broadcast_i3*/
+    Variadic<HLO_Tensor>:$operands, /*collective_broadcast_i1*/
+    StableHLO_ReplicaGroups:$replica_groups, /*collective_broadcast_i2*/
+    OptionalAttr<StableHLO_ChannelHandle>:$channel_handle, /*collective_broadcast_i3*/
+    UnitAttr:$has_dynamic_root /*collective_broadcast_i4*/
   );
-  let results = (outs HLO_Tensor);
+  let results = (outs Variadic<HLO_Tensor>);
   let hasVerifier = 1;
-  // channel_handle is only used for the SPMD partitioner, so we add a
-  // simplified builder method for convenience.
+}
+
+def StableHLO_CollectiveReduceOp : StableHLO_Op<"collective_reduce",
+    [HLO_SpeculatableIfStaticDimInOutputIsStaticInInput,
+     InferTensorType /*collective_reduce_c6, collective_reduce_c7*/,
+     SingleBlockImplicitTerminator<"ReturnOp">,
+     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "CollectiveReduce operation";
+  let description = [{
+    Within each process group in the process grid, applies a reduction function
+    `computation` to the values of the `operands` from each process and produces
+    a `result` tensor on the root rank of the group. The root rank is determined
+    by `has_dynamic_root`: if false, the root is the 0-th rank in the replica
+    group; if true, the last operand is an i32 tensor specifying per-operand
+    root indices.
+
+    See:
+    https://github.com/openxla/stablehlo/blob/main/docs/spec.md#collective_reduce
+
+    Example:
+    ```mlir
+    %result = "stablehlo.collective_reduce"(%operand) ({
+      ^bb0(%arg0: tensor<i64>, %arg1: tensor<i64>):
+        %0 = "stablehlo.add"(%arg0, %arg1) : (tensor<i64>, tensor<i64>) -> tensor<i64>
+        "stablehlo.return"(%0) : (tensor<i64>) -> ()
+    }) {
+      replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>
+    } : (tensor<4xi64>) -> tensor<4xi64>
+    ```
+  }];
+
+  let arguments = (ins
+    Variadic<HLO_Tensor>:$operands, /*collective_reduce_i1*/
+    StableHLO_ReplicaGroups:$replica_groups, /*collective_reduce_i2*/
+    OptionalAttr<StableHLO_ChannelHandle>:$channel_handle, /*collective_reduce_i3*/
+    UnitAttr:$use_global_device_ids, /*collective_reduce_i4*/
+    UnitAttr:$has_dynamic_root /*collective_reduce_i5*/
+  );
+  let regions = (region SizedRegion<1>:$computation /*collective_reduce_i6*/);
+  let results = (outs Variadic<HLO_Tensor>);
+  let hasVerifier = 1;
   let builders = [
     OpBuilder<(ins
       "::mlir::Type":$result_type, "::mlir::Value":$operand,
-      "::mlir::DenseIntElementsAttr":$replica_groups)>];
+      "::mlir::Attribute":$replica_groups,
+      "::mlir::stablehlo::ChannelHandleAttr":$channel_handle,
+      CArg<"bool", "false">:$use_global_device_ids,
+      CArg<"bool", "false">:$has_dynamic_root)>,
+  ];
 }
 
 def StableHLO_CollectivePermuteOp: StableHLO_Op<"collective_permute",
@@ -2369,6 +2491,10 @@ def StableHLO_CompositeOp : StableHLO_Op<"composite", [DeclareOpInterfaceMethods
     The `version` field (defaults to `0`) is used to denote when a composite's
     semantics change.
 
+    The intent of `composite_regions` is to only be used to model ops with
+    bodies, regions are thrown away if the fallback decomposition function gets
+    inlined.
+
     See:
     https://github.com/openxla/stablehlo/blob/main/docs/spec.md#composite
 
@@ -2391,9 +2517,31 @@ def StableHLO_CompositeOp : StableHLO_Op<"composite", [DeclareOpInterfaceMethods
     FlatSymbolRefAttr:$decomposition, /*composite_i4*/
     DefaultValuedOptionalAttr<I32Attr, "0">:$version /*composite_i5*/
   );
+  let regions = (region VariadicRegion<AnyRegion>:$composite_regions);
   let results = (outs Variadic<HLO_TensorOrPerAxisQuantizedTensorOrTokenOrTuple>);
 
-  let assemblyFormat = "$name $inputs attr-dict `:` functional-type(operands, results)";
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::TypeRange":$resultTypes, "::mlir::ValueRange":$inputs,
+      "::mlir::ArrayRef<::mlir::NamedAttribute>":$attributes
+    ), [{
+      build($_builder, $_state, resultTypes, inputs, attributes,
+            /*regionsCount=*/0);
+    }]>,
+    OpBuilder<(ins
+      "::mlir::TypeRange":$resultTypes, "::mlir::ValueRange":$inputs,
+      "::mlir::StringRef":$name, "::mlir::DictionaryAttr":$attributes,
+      "::mlir::StringRef":$decomposition, CArg<"uint32_t", "0">:$version
+    ), [{
+      build($_builder, $_state, resultTypes, inputs, name, attributes,
+            decomposition, version, /*regionsCount=*/0);
+    }]>
+  ];
+
+  let assemblyFormat = [{
+    $name operands (` ` `(` $composite_regions^ `)`)? attr-dict
+    `:` functional-type(operands, results)
+  }];
 }
 
 def StableHLO_ConvolutionOp : StableHLO_Op<"convolution",
@@ -2539,7 +2687,8 @@ def StableHLO_CustomCallOp: StableHLO_Op<"custom_call",
         TypedArrayAttrBase<
             StableHLO_OutputOperandAlias,
             "Aliasing attribute for outputs and operands of CustomCall">,
-        "{}">:$output_operand_aliases
+        "{}">:$output_operand_aliases,
+    OptionalAttr<StableHLO_ArrayOfTilingAttr>:$result_tilings
   );
 
   let results = (outs Variadic<HLO_CustomCallValue>);
@@ -2557,7 +2706,7 @@ def StableHLO_CustomCallOp: StableHLO_Op<"custom_call",
   }];
 }
 
-def StableHLO_DotOp: StableHLO_Op<"dot", [Pure]> {
+def StableHLO_DotOp: StableHLO_Op<"dot", [Pure, DeclareOpInterfaceMethods<InferShapedTypeOpInterface, ["inferReturnTypeComponents"]>]> {
   let summary = "Dot operation";
   let description = [{
     This operation is on its way out of StableHLO, so it is not included in
@@ -2587,7 +2736,8 @@ def StableHLO_DotOp: StableHLO_Op<"dot", [Pure]> {
 }
 
 def StableHLO_DotGeneralOp: StableHLO_ShapedInterfaceOp<"dot_general",
-    [ConditionallySpeculatable, NoMemoryEffect]> {
+    [ConditionallySpeculatable, NoMemoryEffect,
+     DeclareOpInterfaceMethods<InferShapedTypeOpInterface, ["inferReturnTypeComponents"]>]> {
   let summary = "DotGeneral operation";
   let description = [{
     Computes dot products between slices of `lhs` and slices of `rhs` and

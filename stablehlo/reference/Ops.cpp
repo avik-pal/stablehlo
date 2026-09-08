@@ -51,6 +51,7 @@ limitations under the License.
 #include "mlir/Support/LLVM.h"
 #include "mlir/Support/LogicalResult.h"
 #include "stablehlo/dialect/Base.h"
+#include "stablehlo/dialect/ReplicaGroupUtils.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/dialect/TypeInference.h"
 #include "stablehlo/reference/Axes.h"
@@ -93,9 +94,10 @@ SmallVector<T> extractAttributeOrDefault(std::optional<ArrayRef<T>> attr,
   return SmallVector<T>(size, value);
 }
 
-Tensor dotGeneralOp(const Tensor &lhs, const Tensor &rhs,
-                    const Axes &lhsContractingDimensions,
-                    const Axes &rhsContractingDimensions) {
+Tensor dotGeneralOp(const Tensor& lhs, const Tensor& rhs,
+                    const Axes& lhsContractingDimensions,
+                    const Axes& rhsContractingDimensions,
+                    const Type resultElementType) {
   SmallVector<ShapedTypeComponents> inferredDotGeneralType;
   if (failed(hlo::inferDotGeneralOp(
           /*location=*/{}, lhs.getType(), rhs.getType(),
@@ -109,12 +111,12 @@ Tensor dotGeneralOp(const Tensor &lhs, const Tensor &rhs,
                       /*rhsBatchingDimensions*/ {}, lhsContractingDimensions,
                       rhsContractingDimensions,
                       RankedTensorType::get(inferredDotGeneralType[0].getDims(),
-                                            lhs.getElementType()));
+                                            resultElementType));
 }
 
-Tensor padOp(const Tensor &operand, const Tensor &paddingValue,
-             const Sizes &edgePaddingLow, const Sizes &edgePaddingHigh,
-             const Sizes &interiorPadding) {
+Tensor padOp(const Tensor& operand, const Tensor& paddingValue,
+             const Sizes& edgePaddingLow, const Sizes& edgePaddingHigh,
+             const Sizes& interiorPadding) {
   SmallVector<Type> inferredTypes;
   Builder builder(operand.getType().getContext());
   auto inferStatus = hlo::inferPadOp(
@@ -128,13 +130,13 @@ Tensor padOp(const Tensor &operand, const Tensor &paddingValue,
 
 SmallVector<Tensor> reduceOp(ArrayRef<Tensor> inputs,
                              ArrayRef<Tensor> initValues,
-                             const Axes &dimensions, Region &body,
-                             Process *process, Scope &scope) {
+                             const Axes& dimensions, Region& body,
+                             Process* process, Scope& scope) {
   SmallVector<Type> inputTypes;
-  for (const auto &input : inputs) inputTypes.push_back(input.getType());
+  for (const auto& input : inputs) inputTypes.push_back(input.getType());
 
   SmallVector<Type> initValueTypes;
-  for (const auto &initValue : initValues)
+  for (const auto& initValue : initValues)
     initValueTypes.push_back(initValue.getType());
 
   SmallVector<ShapedTypeComponents> inferredReduceTypes;
@@ -146,7 +148,7 @@ SmallVector<Tensor> reduceOp(ArrayRef<Tensor> inputs,
         invalidArgument("Could not infer ReduceOp's return type"));
 
   SmallVector<ShapedType> resultTypes;
-  for (const auto &inferredType : inferredReduceTypes) {
+  for (const auto& inferredType : inferredReduceTypes) {
     auto shapedType = hlo::createShapedType(inferredType);
     if (!shapedType)
       llvm::report_fatal_error("Could not infer ReduceOp's return type");
@@ -156,8 +158,8 @@ SmallVector<Tensor> reduceOp(ArrayRef<Tensor> inputs,
                   resultTypes);
 }
 
-Tensor sliceOp(const Tensor &operand, const Sizes &startIndices,
-               const Sizes &limitIndices, const Sizes &strides) {
+Tensor sliceOp(const Tensor& operand, const Sizes& startIndices,
+               const Sizes& limitIndices, const Sizes& strides) {
   SmallVector<Type> inferredTypes;
   Builder builder(operand.getType().getContext());
   auto inferStatus = hlo::inferSliceOp({}, operand.getType(), startIndices,
@@ -170,8 +172,8 @@ Tensor sliceOp(const Tensor &operand, const Sizes &startIndices,
 }
 
 SmallVector<InterpreterValue> callOp(ArrayRef<Tensor> inputs,
-                                     InterpreterFallback *fallback,
-                                     Process *process, Operation *op,
+                                     InterpreterFallback* fallback,
+                                     Process* process, Operation* op,
                                      StringRef funcName) {
   SymbolTableCollection symbolTableCollection;
   auto symbolTable =
@@ -179,14 +181,14 @@ SmallVector<InterpreterValue> callOp(ArrayRef<Tensor> inputs,
   auto func = symbolTable.lookupNearestSymbolFrom<func::FuncOp>(
       op, StringAttr::get(op->getContext(), funcName));
   SmallVector<InterpreterValue> values = llvm::map_to_vector(
-      inputs, [](const Tensor &t) { return InterpreterValue(t); });
+      inputs, [](const Tensor& t) { return InterpreterValue(t); });
   return eval(func.getBody(), values, fallback, process, nullptr);
 }
 
 // Experimental notation for slices, roughly following the spec notation.
 // TODO(#1401): Might evolve in the future together with the spec.
 constexpr int64_t kColon = -1;
-Tensor sliceOp(const Tensor &operand, const Index &index) {
+Tensor sliceOp(const Tensor& operand, const Index& index) {
   Sizes start, limit;
   for (auto i = 0; i < operand.getRank(); ++i) {
     if (index[i] == -1) {
@@ -207,7 +209,7 @@ Sizes extractElements(ArrayRef<int64_t> arr, ArrayRef<int64_t> indices) {
   return elements;
 }
 
-void failOnDecomposableOp(Operation &op) {
+void failOnDecomposableOp(Operation& op) {
   report_fatal_error(invalidArgument(
       "Operation %s is unsupported at the moment. "
       "However, this operation can be decomposed into supported operations, "
@@ -224,30 +226,65 @@ DenseIntElementsAttr getDenseIntElementsAttr(Type elementType, T values,
       RankedTensorType::get(valuesShape, elementType), values);
 }
 
-SmallVector<SmallVector<uint32_t>> getReplicaGroups(
-    DenseIntElementsAttr replicaGroupsAttr) {
-  auto replicaGroupsShape = replicaGroupsAttr.getShapedType().getShape();
-  SmallVector<SmallVector<uint32_t>> replicaGroups(replicaGroupsShape[0]);
-  auto replicaGroupsIt = replicaGroupsAttr.getValues<int64_t>().begin();
-  for (auto &replicaGroup : replicaGroups) {
-    for (auto i = 0; i < replicaGroupsShape[1]; ++i, ++replicaGroupsIt) {
-      auto replicaId = *replicaGroupsIt;
-      if (replicaId == -1) continue;
-      replicaGroup.push_back(replicaId);
+SmallVector<SmallVector<uint32_t>> getReplicaGroups(Attribute replicaGroupsAttr,
+                                                    Operation* op) {
+  if (auto denseAttr =
+          llvm::dyn_cast_or_null<DenseIntElementsAttr>(replicaGroupsAttr)) {
+    auto replicaGroupsShape = denseAttr.getShapedType().getShape();
+    SmallVector<SmallVector<uint32_t>> replicaGroups(replicaGroupsShape[0]);
+    auto replicaGroupsIt = denseAttr.getValues<int64_t>().begin();
+    for (auto& replicaGroup : replicaGroups) {
+      for (auto i = 0; i < replicaGroupsShape[1]; ++i, ++replicaGroupsIt) {
+        auto replicaId = *replicaGroupsIt;
+        if (replicaId == -1) continue;
+        replicaGroup.push_back(replicaId);
+      }
     }
+    return replicaGroups;
   }
-  return replicaGroups;
+  if (auto meshAxesAttr =
+          llvm::dyn_cast_or_null<ReplicaGroupMeshAxesAttr>(replicaGroupsAttr)) {
+    auto meshSpec = meshAxesAttr.getMesh();
+    auto meshAttr = llvm::dyn_cast_or_null<stablehlo::MeshAttr>(meshSpec);
+    if (!meshAttr) {
+      auto symbolOp = SymbolTable::lookupNearestSymbolFrom(
+          op, llvm::cast<SymbolRefAttr>(meshSpec));
+      if (!symbolOp) {
+        llvm::report_fatal_error("Failed to find mesh symbol");
+      }
+      meshAttr = symbolOp->getAttrOfType<stablehlo::MeshAttr>("mesh");
+      if (!meshAttr) {
+        meshAttr =
+            symbolOp->getAttrOfType<stablehlo::MeshAttr>("stablehlo.mesh");
+      }
+      if (!meshAttr) {
+        llvm::report_fatal_error("Failed to find mesh attribute on symbol");
+      }
+    }
+    auto groupsOrFailure = flattenReplicaGroupMeshAxes(
+        meshAttr, meshAxesAttr.getAxes(), op->getLoc());
+    if (failed(groupsOrFailure)) {
+      llvm::report_fatal_error("Failed to flatten replica group mesh axes");
+    }
+
+    SmallVector<SmallVector<uint32_t>> u32Groups;
+    for (const auto& group : groupsOrFailure.value()) {
+      u32Groups.push_back(SmallVector<uint32_t>(group.begin(), group.end()));
+    }
+    return u32Groups;
+  }
+  return {};
 }
 
 Tensor convolutionOp(
-    const Tensor &lhs, const Tensor &rhs, ArrayRef<int64_t> windowStrides,
+    const Tensor& lhs, const Tensor& rhs, ArrayRef<int64_t> windowStrides,
     ArrayRef<std::pair<int64_t, int64_t>> padding,
     ArrayRef<int64_t> lhsDilation, ArrayRef<int64_t> rhsDilation,
     ArrayRef<bool> windowReversal, Axis inputBatchDimension,
-    Axis inputFeatureDimension, const Axes &inputSpatialDimensions,
+    Axis inputFeatureDimension, const Axes& inputSpatialDimensions,
     Axis kernelInputFeatureDimension, Axis kernelOutputFeatureDimension,
-    const Axes &kernelSpatialDimensions, Axis outputBatchDimension,
-    Axis outputFeatureDimension, const Axes &outputSpatialDimensions,
+    const Axes& kernelSpatialDimensions, Axis outputBatchDimension,
+    Axis outputFeatureDimension, const Axes& outputSpatialDimensions,
     int64_t featureGroupCount, int64_t batchGroupCount,
     std::optional<ArrayAttr> precisionConfig, ShapedType resultType) {
   SmallVector<int64_t> paddingVector;
@@ -289,7 +326,7 @@ Tensor convolutionOp(
 // result[permutation[i]] = input[i].
 template <typename T>
 SmallVector<T> concatAndPermute(T n, SmallVector<T> hw, T c,
-                                const Axes &permutation) {
+                                const Axes& permutation) {
   SmallVector<T> result(permutation.size());
   result[permutation[0]] = n;
   result[permutation[permutation.size() - 1]] = c;
@@ -309,7 +346,7 @@ Tensor constant(T value, Type elementType) {
   return constant(convert(elementType, value));
 }
 
-Tensor makeSplat(ShapedType type, const Element &initValue) {
+Tensor makeSplat(ShapedType type, const Element& initValue) {
   Tensor result(type);
   for (auto indexIt = result.index_begin(); indexIt != result.index_end();
        ++indexIt)
@@ -317,8 +354,8 @@ Tensor makeSplat(ShapedType type, const Element &initValue) {
   return result;
 }
 
-SmallVector<Tensor> split(const Tensor &x, int64_t numResults, Axis axis,
-                          MLIRContext *context) {
+SmallVector<Tensor> split(const Tensor& x, int64_t numResults, Axis axis,
+                          MLIRContext* context) {
   Sizes resultShape(x.getShape());
   if (resultShape[axis] % numResults != 0)
     report_fatal_error(
@@ -345,11 +382,11 @@ SmallVector<Tensor> split(const Tensor &x, int64_t numResults, Axis axis,
 
 }  // namespace
 
-SmallVector<InterpreterValue> eval(Region &region,
+SmallVector<InterpreterValue> eval(Region& region,
                                    ArrayRef<InterpreterValue> args,
-                                   InterpreterFallback *fallback,
-                                   Process *process, Scope *parent) {
-  Block &block = region.front();
+                                   InterpreterFallback* fallback,
+                                   Process* process, Scope* parent) {
+  Block& block = region.front();
   if (block.getArguments().size() != args.size())
     report_fatal_error(invalidArgument(
         "Expected same number of block arguments and runtime arguments (%d)",
@@ -358,7 +395,7 @@ SmallVector<InterpreterValue> eval(Region &region,
   Scope scope(parent);
   scope.add(block.getArguments(), args);
 
-  for (Operation &operation : block) {
+  for (Operation& operation : block) {
     if (!llvm::all_of(operation.getResults(), [](OpResult r) {
           if (auto shaped = dyn_cast<ShapedType>(r.getType()))
             return shaped.hasStaticShape();
@@ -383,13 +420,8 @@ SmallVector<InterpreterValue> eval(Region &region,
     } else if (auto op = dyn_cast<AllGatherOp>(operation)) {
       auto operands = scope.findTensors(op.getOperands());
 
-      auto replicaGroupsAttr = op.getReplicaGroups();
-      auto replicaGroupsShape = replicaGroupsAttr.getShapedType().getShape();
-      SmallVector<SmallVector<uint32_t>> replicaGroups(replicaGroupsShape[0]);
-      auto replicaGroupsIt = replicaGroupsAttr.getValues<int64_t>().begin();
-      for (auto &replicaGroup : replicaGroups)
-        for (auto i = 0; i < replicaGroupsShape[1]; ++i, ++replicaGroupsIt)
-          replicaGroup.push_back(*replicaGroupsIt);
+      SmallVector<SmallVector<uint32_t>> replicaGroups =
+          getReplicaGroups(op.getReplicaGroups(), op);
 
       ChannelId channelId = 0;
       if (auto channelHandle = op.getChannelHandle())
@@ -402,7 +434,8 @@ SmallVector<InterpreterValue> eval(Region &region,
       scope.add(op.getResults(), results);
     } else if (auto op = dyn_cast<AllReduceOp>(operation)) {
       auto operands = scope.findTensors(op.getOperands());
-      auto replicaGroups = getReplicaGroups(op.getReplicaGroups());
+      SmallVector<SmallVector<uint32_t>> replicaGroups =
+          getReplicaGroups(op.getReplicaGroups(), op);
 
       ChannelId channelId = 0;
       if (auto channelHandle = op.getChannelHandle())
@@ -415,13 +448,8 @@ SmallVector<InterpreterValue> eval(Region &region,
       scope.add(op.getResults(), results);
     } else if (auto op = dyn_cast<AllToAllOp>(operation)) {
       auto operands = scope.findTensors(op.getOperands());
-      auto replicaGroupsAttr = op.getReplicaGroups();
-      auto replicaGroupsShape = replicaGroupsAttr.getShapedType().getShape();
-      SmallVector<SmallVector<uint32_t>> replicaGroups(replicaGroupsShape[0]);
-      auto replicaGroupsIt = replicaGroupsAttr.getValues<int64_t>().begin();
-      for (auto &replicaGroup : replicaGroups)
-        for (auto i = 0; i < replicaGroupsShape[1]; ++i, ++replicaGroupsIt)
-          replicaGroup.push_back(*replicaGroupsIt);
+      SmallVector<SmallVector<uint32_t>> replicaGroups =
+          getReplicaGroups(op.getReplicaGroups(), op);
 
       ChannelId channelId = 0;
       if (auto channelHandle = op.getChannelHandle())
@@ -491,23 +519,31 @@ SmallVector<InterpreterValue> eval(Region &region,
       auto result = clzOp(operand, op.getType());
       scope.add(op.getResult(), result);
     } else if (auto op = dyn_cast<CollectiveBroadcastOp>(operation)) {
-      auto operand = scope.findTensor(op.getOperand());
+      auto operands = scope.findTensors(op.getOperands());
 
-      auto replicaGroupsAttr = op.getReplicaGroups();
-      auto replicaGroupsShape = replicaGroupsAttr.getShapedType().getShape();
-      SmallVector<SmallVector<uint32_t>> replicaGroups(replicaGroupsShape[0]);
-      auto replicaGroupsIt = replicaGroupsAttr.getValues<int64_t>().begin();
-      for (auto &replicaGroup : replicaGroups)
-        for (auto i = 0; i < replicaGroupsShape[1]; ++i, ++replicaGroupsIt)
-          replicaGroup.push_back(*replicaGroupsIt);
+      SmallVector<SmallVector<uint32_t>> replicaGroups =
+          getReplicaGroups(op.getReplicaGroups(), op);
 
       ChannelId channelId = 0;
       if (auto channelHandle = op.getChannelHandle())
         channelId = channelHandle->getHandle();
 
-      auto result =
-          collectiveBroadcastOp(operand, replicaGroups, channelId, process);
-      scope.add(op.getResult(), result);
+      auto results = collectiveBroadcastOp(operands, replicaGroups, channelId,
+                                           op.getHasDynamicRoot(), process);
+      scope.add(op.getResults(), results);
+    } else if (auto op = dyn_cast<CollectiveReduceOp>(operation)) {
+      auto operands = scope.findTensors(op.getOperands());
+      SmallVector<SmallVector<uint32_t>> replicaGroups =
+          getReplicaGroups(op.getReplicaGroups(), op);
+      ChannelId channelId = 0;
+      if (auto channelHandle = op.getChannelHandle())
+        channelId = channelHandle->getHandle();
+      SmallVector<ShapedType> resultTypes(op->getResultTypes());
+      auto results =
+          collectiveReduceOp(operands, replicaGroups, channelId,
+                             op.getUseGlobalDeviceIds(), op.getHasDynamicRoot(),
+                             op.getComputation(), process, scope, resultTypes);
+      scope.add(op.getResults(), results);
     } else if (auto op = dyn_cast<CollectivePermuteOp>(operation)) {
       auto operand = scope.findTensor(op.getOperand());
 
@@ -516,7 +552,7 @@ SmallVector<InterpreterValue> eval(Region &region,
           sourceTargetPairsAttr.getNumElements() / 2);
       auto sourceTargetPairsIt =
           sourceTargetPairsAttr.getValues<int64_t>().begin();
-      for (auto &sourceTargetPair : sourceTargetPairs) {
+      for (auto& sourceTargetPair : sourceTargetPairs) {
         sourceTargetPair.push_back(*sourceTargetPairsIt++);
         sourceTargetPair.push_back(*sourceTargetPairsIt++);
       }
@@ -768,8 +804,8 @@ SmallVector<InterpreterValue> eval(Region &region,
       scope.add(op.getResult(), result);
     } else if (auto op = dyn_cast<IfOp>(operation)) {
       auto pred = scope.findTensor(op.getPred());
-      auto &trueBranch = op.getTrueBranch();
-      auto &falseBranch = op.getFalseBranch();
+      auto& trueBranch = op.getTrueBranch();
+      auto& falseBranch = op.getFalseBranch();
       auto results = ifOp(pred, trueBranch, falseBranch, process, scope);
       scope.add(op.getResults(), results);
     } else if (auto op = dyn_cast<ImagOp>(operation)) {
@@ -802,7 +838,7 @@ SmallVector<InterpreterValue> eval(Region &region,
       scope.add(op.getResult(), result);
     } else if (auto op = dyn_cast<MapOp>(operation)) {
       auto inputs = scope.findTensors(op.getInputs());
-      auto &computation = op.getComputation();
+      auto& computation = op.getComputation();
       auto result = mapOp(inputs, computation, process, scope, op.getType());
       scope.add(op.getResult(), result);
     } else if (auto op = dyn_cast<MaxOp>(operation)) {
@@ -892,7 +928,8 @@ SmallVector<InterpreterValue> eval(Region &region,
     } else if (auto op = dyn_cast<ReduceScatterOp>(operation)) {
       auto operand = scope.findTensor(op.getOperand());
       int64_t scatterDimension = op.getScatterDimension();
-      auto replicaGroups = getReplicaGroups(op.getReplicaGroups());
+      SmallVector<SmallVector<uint32_t>> replicaGroups =
+          getReplicaGroups(op.getReplicaGroups(), op);
 
       ChannelId channelId = 0;
       if (auto channelHandle = op.getChannelHandle())
@@ -990,7 +1027,7 @@ SmallVector<InterpreterValue> eval(Region &region,
       Axes scatterDimsToOperandDims(
           scatterDimensionNumbers.getScatterDimsToOperandDims());
       Axis indexVectorDim(scatterDimensionNumbers.getIndexVectorDim());
-      auto &updateComputation = op.getUpdateComputation();
+      auto& updateComputation = op.getUpdateComputation();
       SmallVector<ShapedType> resultTypes(op->getResultTypes());
       auto results = scatterOp(inputs, scatterIndices, updates,
                                updateWindowDims, insertedWindowDims,
@@ -1076,7 +1113,7 @@ SmallVector<InterpreterValue> eval(Region &region,
       auto operands = scope.findTensors(op.getInputs());
       auto dimension = op.getDimension();
       auto isStable = op.getIsStable();
-      auto &comparator = op.getComparator();
+      auto& comparator = op.getComparator();
       auto results =
           sortOp(operands, dimension, isStable, comparator, process, scope);
       scope.add(op.getResults(), results);
@@ -1104,8 +1141,16 @@ SmallVector<InterpreterValue> eval(Region &region,
       auto permutation = Axes(op.getPermutation());
       auto result = transposeOp(operand, permutation, op.getType());
       scope.add(op.getResult(), result);
-    } else if (isa<TriangularSolveOp>(operation)) {
-      failOnDecomposableOp(operation);
+    } else if (auto op = dyn_cast<TriangularSolveOp>(operation)) {
+      auto A = scope.findTensor(op.getA());
+      auto b = scope.findTensor(op.getB());
+      auto leftSide = op.getLeftSide();
+      auto lower = op.getLower();
+      auto unitDiagonal = op.getUnitDiagonal();
+      auto transposeA = op.getTransposeA();
+      auto result = triangularSolveOp(A, b, leftSide, lower, unitDiagonal,
+                                      transposeA, op.getType());
+      scope.add(op.getResult(), result);
     } else if (auto op = dyn_cast<TupleOp>(operation)) {
       auto val = scope.find(op.getVal());
       auto result = tupleOp(val, cast<TupleType>(op.getType()));
@@ -1114,8 +1159,8 @@ SmallVector<InterpreterValue> eval(Region &region,
       failOnDecomposableOp(operation);
     } else if (auto op = dyn_cast<WhileOp>(operation)) {
       auto operand = scope.find(op.getOperand());
-      auto &cond = op.getCond();
-      auto &body = op.getBody();
+      auto& cond = op.getCond();
+      auto& body = op.getBody();
       auto results = whileOp(operand, cond, body, fallback, process, scope);
       scope.add(op.getResults(), results);
     } else if (auto op = dyn_cast<XorOp>(operation)) {
@@ -1135,28 +1180,28 @@ SmallVector<InterpreterValue> eval(Region &region,
   llvm::report_fatal_error("Expected a terminator when evaluating a region");
 }
 
-Tensor absOp(const Tensor &operand, ShapedType resultType) {
+Tensor absOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, abs(operand.get(*it)));
   return result;
 }
 
-Tensor addOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor addOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, lhs.get(*it) + rhs.get(*it));
   return result;
 }
 
-Token afterAllOp(ArrayRef<Token> inputs, MLIRContext *context) {
+Token afterAllOp(ArrayRef<Token> inputs, MLIRContext* context) {
   return Token(context);
 }
 
 SmallVector<InterpreterValue> allGatherOp(
     ArrayRef<Tensor> operands, int64_t allGatherDim,
     SmallVector<SmallVector<uint32_t>> replicaGroups, ChannelId channelId,
-    bool useGlobalDeviceIds, Process *process,
+    bool useGlobalDeviceIds, Process* process,
     ArrayRef<ShapedType> resultTypes) {
   if (!process)
     llvm::report_fatal_error(
@@ -1179,10 +1224,10 @@ SmallVector<InterpreterValue> allGatherOp(
       process->rendezvous(*processGroup, channelId, operands);
 
   SmallVector<InterpreterValue> results(resultTypes.size());
-  for (const auto &[resultIndex, resultType] : llvm::enumerate(resultTypes)) {
+  for (const auto& [resultIndex, resultType] : llvm::enumerate(resultTypes)) {
     auto operandIndex = resultIndex;
     auto operandsAtIndex =
-        llvm::map_to_vector(*processGroup, [&](const ProcessId &id) {
+        llvm::map_to_vector(*processGroup, [&](const ProcessId& id) {
           return (rendezvousResult.lookup(id))[operandIndex];
         });
     results[resultIndex] =
@@ -1193,8 +1238,8 @@ SmallVector<InterpreterValue> allGatherOp(
 
 SmallVector<InterpreterValue> allReduceOp(
     ArrayRef<Tensor> operands, SmallVector<SmallVector<uint32_t>> replicaGroups,
-    ChannelId channelId, bool useGlobalDeviceIds, Region &computation,
-    Process *process, Scope &scope, ArrayRef<ShapedType> resultTypes) {
+    ChannelId channelId, bool useGlobalDeviceIds, Region& computation,
+    Process* process, Scope& scope, ArrayRef<ShapedType> resultTypes) {
   if (!process)
     llvm::report_fatal_error(
         "all_reduce is only supported when run via interpreter.run_parallel");
@@ -1216,12 +1261,12 @@ SmallVector<InterpreterValue> allReduceOp(
                            .getSortedTensors();
 
   SmallVector<InterpreterValue> results(resultTypes.size());
-  for (const auto &[resultIndex, resultType] : llvm::enumerate(resultTypes)) {
+  for (const auto& [resultIndex, resultType] : llvm::enumerate(resultTypes)) {
     Tensor result(resultType);
     for (auto elementIndex = result.index_begin();
          elementIndex != result.index_end(); ++elementIndex) {
       Tensor resultElement;
-      for (const auto &processOperands : groupOperands) {
+      for (const auto& processOperands : groupOperands) {
         auto OperandElement =
             constant(processOperands[resultIndex].get(*elementIndex));
         if (resultElement)
@@ -1241,7 +1286,7 @@ SmallVector<InterpreterValue> allReduceOp(
 SmallVector<InterpreterValue> allToAllOp(
     ArrayRef<Tensor> operands, Axis splitDimension, Axis concatDimension,
     int64_t splitCount, SmallVector<SmallVector<uint32_t>> replicaGroups,
-    ChannelId channelId, Process *process, ArrayRef<ShapedType> resultTypes) {
+    ChannelId channelId, Process* process, ArrayRef<ShapedType> resultTypes) {
   if (!process)
     llvm::report_fatal_error(
         "all_to_all is only supported when run via interpreter.run_parallel");
@@ -1261,9 +1306,9 @@ SmallVector<InterpreterValue> allToAllOp(
   auto receiverIndex = llvm::find(processGroup.value(), process->getId()) -
                        processGroup->begin();
   SmallVector<InterpreterValue> results(resultTypes.size());
-  for (const auto &[resultIndex, resultType] : llvm::enumerate(resultTypes)) {
+  for (const auto& [resultIndex, resultType] : llvm::enumerate(resultTypes)) {
     SmallVector<Tensor> scatteredParts;
-    for (const auto &sender : processGroup.value()) {
+    for (const auto& sender : processGroup.value()) {
       auto splitParts =
           split(groupOperands.lookup(sender)[resultIndex], splitCount,
                 splitDimension, operands[resultIndex].getType().getContext());
@@ -1274,21 +1319,21 @@ SmallVector<InterpreterValue> allToAllOp(
   }
   return results;
 }
-Tensor andOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor andOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, lhs.get(*it) & rhs.get(*it));
   return result;
 }
 
-Tensor atan2Op(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor atan2Op(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, atan2(lhs.get(*it), rhs.get(*it)));
   return result;
 }
 
-Tensor bitcastConvertOp(const Tensor &operand, ShapedType resultType) {
+Tensor bitcastConvertOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
 
   auto resultElementType = result.getElementType();
@@ -1301,7 +1346,7 @@ Tensor bitcastConvertOp(const Tensor &operand, ShapedType resultType) {
          operandIt != operand.index_end(); ++operandIt) {
       auto resultElements =
           bitcastConvertOneToMany(resultElementType, operand.get(*operandIt));
-      for (const auto &resultElement : resultElements)
+      for (const auto& resultElement : resultElements)
         result.set(*resultIt++, resultElement);
     }
     return result;
@@ -1326,7 +1371,7 @@ Tensor bitcastConvertOp(const Tensor &operand, ShapedType resultType) {
   return result;
 }
 
-Tensor broadcastInDimOp(const Tensor &operand, const Axes &broadcastDimensions,
+Tensor broadcastInDimOp(const Tensor& operand, const Axes& broadcastDimensions,
                         ShapedType resultType) {
   Tensor result(resultType);
   for (auto resultIt = result.index_begin(); resultIt != result.index_end();
@@ -1342,8 +1387,8 @@ Tensor broadcastInDimOp(const Tensor &operand, const Axes &broadcastDimensions,
   return result;
 }
 
-SmallVector<InterpreterValue> caseOp(const Tensor &index, RegionRange branches,
-                                     Process *process, Scope &scope) {
+SmallVector<InterpreterValue> caseOp(const Tensor& index, RegionRange branches,
+                                     Process* process, Scope& scope) {
   int64_t indexValue = index.get({}).getIntegerValue().getSExtValue();
   if (indexValue < 0 || indexValue >= static_cast<int64_t>(branches.size()))
     indexValue = branches.size() - 1;
@@ -1351,21 +1396,21 @@ SmallVector<InterpreterValue> caseOp(const Tensor &index, RegionRange branches,
   return eval(*branches[indexValue], {}, /*fallback=*/nullptr, process, &scope);
 }
 
-Tensor cbrtOp(const Tensor &operand, ShapedType resultType) {
+Tensor cbrtOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, cbrt(operand.get(*it)));
   return result;
 }
 
-Tensor ceilOp(const Tensor &operand, ShapedType resultType) {
+Tensor ceilOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, ceil(operand.get(*it)));
   return result;
 }
 
-Tensor clampOp(const Tensor &min, const Tensor &operand, const Tensor &max,
+Tensor clampOp(const Tensor& min, const Tensor& operand, const Tensor& max,
                ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it) {
@@ -1377,7 +1422,7 @@ Tensor clampOp(const Tensor &min, const Tensor &operand, const Tensor &max,
   return result;
 }
 
-Tensor clzOp(const Tensor &operand, ShapedType resultType) {
+Tensor clzOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it) {
     auto element =
@@ -1389,9 +1434,9 @@ Tensor clzOp(const Tensor &operand, ShapedType resultType) {
   return result;
 }
 
-Tensor collectiveBroadcastOp(const Tensor &operand,
-                             SmallVector<SmallVector<uint32_t>> replicaGroups,
-                             ChannelId channelId, Process *process) {
+SmallVector<InterpreterValue> collectiveBroadcastOp(
+    ArrayRef<Tensor> operands, SmallVector<SmallVector<uint32_t>> replicaGroups,
+    ChannelId channelId, bool hasDynamicRoot, Process* process) {
   if (!process)
     llvm::report_fatal_error(
         "collective_broadcast is only supported when run via "
@@ -1401,19 +1446,117 @@ Tensor collectiveBroadcastOp(const Tensor &operand,
   if (channelId <= 0) processGroups = process->crossReplica(replicaGroups);
   if (channelId > 0) processGroups = process->crossPartition(replicaGroups);
 
+  // Data operands: all if !hasDynamicRoot, else all but the last.
+  ArrayRef<Tensor> dataOperands =
+      hasDynamicRoot ? operands.drop_back(1) : operands;
+
   auto processGroup = processGroups.findGroup(process->getId());
-  if (processGroup) {
-    return process->rendezvous(*processGroup, channelId, {operand})
-        .lookup((*processGroup)[0])
-        .front();
+  SmallVector<InterpreterValue> results;
+  for (const auto& [dataIndex, dataOperand] : llvm::enumerate(dataOperands)) {
+    if (!processGroup) {
+      results.push_back(
+          broadcastInDimOp(constant(0.0, dataOperand.getElementType()), {},
+                           dataOperand.getType()));
+      continue;
+    }
+
+    ProcessId rootId = (*processGroup)[0];
+    if (hasDynamicRoot) {
+      const Tensor& rootTensor = operands.back();
+      auto rootIdx = rootTensor.get({static_cast<int64_t>(dataIndex)});
+      int64_t rootIdxVal = rootIdx.getIntegerValue().getSExtValue();
+      if (rootIdxVal < 0 ||
+          rootIdxVal >= static_cast<int64_t>(processGroup->size()))
+        llvm::report_fatal_error(
+            "collective_broadcast dynamic root index out of bounds");
+      rootId = (*processGroup)[rootIdxVal];
+    }
+
+    auto rendezResult =
+        process->rendezvous(*processGroup, channelId, {dataOperand});
+    results.push_back(rendezResult.lookup(rootId).front());
   }
-  return broadcastInDimOp(constant(0.0, operand.getElementType()), {},
-                          operand.getType());
+  return results;
 }
 
-Tensor collectivePermuteOp(const Tensor &operand,
+SmallVector<InterpreterValue> collectiveReduceOp(
+    ArrayRef<Tensor> operands, SmallVector<SmallVector<uint32_t>> replicaGroups,
+    ChannelId channelId, bool useGlobalDeviceIds, bool hasDynamicRoot,
+    Region& computation, Process* process, Scope& scope,
+    ArrayRef<ShapedType> resultTypes) {
+  if (!process)
+    llvm::report_fatal_error(
+        "collective_reduce is only supported when run via "
+        "interpreter.run_parallel");
+
+  ProcessGroups processGroups;
+  if (channelId <= 0 && !useGlobalDeviceIds)
+    processGroups = process->crossReplica(replicaGroups);
+  if (channelId > 0 && !useGlobalDeviceIds)
+    processGroups = process->crossReplicaAndPartition(replicaGroups);
+  if (channelId > 0 && useGlobalDeviceIds)
+    processGroups = process->flattenedIds(replicaGroups);
+
+  // Data operands: all if !hasDynamicRoot, else all but the last.
+  ArrayRef<Tensor> dataOperands =
+      hasDynamicRoot ? operands.drop_back(1) : operands;
+
+  auto processGroup = processGroups.findGroup(process->getId());
+  if (!processGroup) {
+    // Not in any group, return zeros.
+    SmallVector<InterpreterValue> zeroResults;
+    for (const auto& resultType : resultTypes)
+      zeroResults.push_back(broadcastInDimOp(
+          constant(0.0, resultType.getElementType()), {}, resultType));
+    return zeroResults;
+  }
+
+  auto groupOperands =
+      process->rendezvous(*processGroup, channelId, dataOperands)
+          .getSortedTensors();
+
+  SmallVector<InterpreterValue> results(resultTypes.size());
+  for (const auto& [resultIndex, resultType] : llvm::enumerate(resultTypes)) {
+    // Find root process for this operand.
+    ProcessId rootId = (*processGroup)[0];  // default: first in group
+    if (hasDynamicRoot) {
+      // Root index comes from the last operand's resultIndex-th element.
+      const Tensor& rootTensor = operands.back();
+      auto rootIdx = rootTensor.get({static_cast<int64_t>(resultIndex)});
+      rootId = (*processGroup)[rootIdx.getIntegerValue().getZExtValue()];
+    }
+
+    // Only root gets the reduced result; others get zeros.
+    if (process->getId() != rootId) {
+      results[resultIndex] = broadcastInDimOp(
+          constant(0.0, resultType.getElementType()), {}, resultType);
+      continue;
+    }
+
+    Tensor resultTensor(resultType);
+    for (auto elementIndex = resultTensor.index_begin();
+         elementIndex != resultTensor.index_end(); ++elementIndex) {
+      Tensor reduced;
+      for (const auto& processOperands : groupOperands) {
+        auto element =
+            constant(processOperands[resultIndex].get(*elementIndex));
+        if (reduced)
+          reduced = eval(computation, {reduced, element},
+                         /*fallback=*/nullptr, process, &scope)[0]
+                        .getTensor();
+        else
+          reduced = element;
+      }
+      resultTensor.set(*elementIndex, reduced.get({}));
+    }
+    results[resultIndex] = resultTensor;
+  }
+  return results;
+}
+
+Tensor collectivePermuteOp(const Tensor& operand,
                            SmallVector<SmallVector<uint32_t>> sourceTargetPairs,
-                           ChannelId channelId, Process *process) {
+                           ChannelId channelId, Process* process) {
   if (!process)
     llvm::report_fatal_error(
         "collective_permute is only supported when run via "
@@ -1428,6 +1571,15 @@ Tensor collectivePermuteOp(const Tensor &operand,
     auto from = processGroup[0];
     auto to = processGroup[1];
     if (from != process->getId() && to != process->getId()) continue;
+
+    // When a self-loop is present, we do not invoke `rendezvous` because
+    // it would result in a deadlock: a process waiting on two processes to
+    // finish when there exists only one.
+    if (from == to) {
+      result = operand;
+      continue;
+    }
+
     auto rendezvousResult =
         process->rendezvous(processGroup, channelId, {operand});
     if (to != process->getId()) continue;
@@ -1439,7 +1591,7 @@ Tensor collectivePermuteOp(const Tensor &operand,
                           operand.getType());
 }
 
-Tensor compareOp(const Tensor &lhs, const Tensor &rhs,
+Tensor compareOp(const Tensor& lhs, const Tensor& rhs,
                  ComparisonDirection comparisonDirection,
                  ShapedType resultType) {
   Tensor result(resultType);
@@ -1468,7 +1620,7 @@ Tensor compareOp(const Tensor &lhs, const Tensor &rhs,
   return result;
 }
 
-Tensor complexOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor complexOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, complex(lhs.get(*it), rhs.get(*it)));
@@ -1479,7 +1631,7 @@ Tensor concatenateOp(ArrayRef<Tensor> inputs, Axis dimension,
                      ShapedType resultType) {
   Tensor result(resultType);
   int64_t dimensionOffset = 0;
-  for (const auto &input : inputs) {
+  for (const auto& input : inputs) {
     for (auto inputIt = input.index_begin(); inputIt != input.index_end();
          ++inputIt) {
       auto inputIndex = *inputIt;
@@ -1496,7 +1648,7 @@ Tensor constantOp(ElementsAttr value) {
   return makeTensor(cast<DenseElementsAttr>(value));
 }
 
-Tensor convertOp(const Tensor &operand, ShapedType resultType) {
+Tensor convertOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, convert(result.getElementType(), operand.get(*it)));
@@ -1504,14 +1656,14 @@ Tensor convertOp(const Tensor &operand, ShapedType resultType) {
 }
 
 Tensor convolutionOp(
-    const Tensor &lhs, const Tensor &rhs, ArrayRef<int64_t> windowStrides,
+    const Tensor& lhs, const Tensor& rhs, ArrayRef<int64_t> windowStrides,
     ArrayRef<std::pair<int64_t, int64_t>> padding,
     ArrayRef<int64_t> lhsDilation, ArrayRef<int64_t> rhsDilation,
     ArrayRef<bool> windowReversal, Axis inputBatchDimension,
-    Axis inputFeatureDimension, const Axes &inputSpatialDimensions,
+    Axis inputFeatureDimension, const Axes& inputSpatialDimensions,
     Axis kernelInputFeatureDimension, Axis kernelOutputFeatureDimension,
-    const Axes &kernelSpatialDimensions, Axis outputBatchDimension,
-    Axis outputFeatureDimension, const Axes &outputSpatialDimensions,
+    const Axes& kernelSpatialDimensions, Axis outputBatchDimension,
+    Axis outputFeatureDimension, const Axes& outputSpatialDimensions,
     int64_t featureGroupCount, int64_t batchGroupCount, ShapedType resultType) {
   Tensor result(resultType);
 
@@ -1619,7 +1771,7 @@ Tensor convolutionOp(
 
     auto dotProduct =
         dotGeneralOp(reversedLhsWindow, rhs, lhsContractingDimensions,
-                     rhsContractingDimensions);
+                     rhsContractingDimensions, resultType.getElementType());
 
     Sizes resultNonSpatialDims;
     for (auto i = 0; i < result.getRank(); ++i)
@@ -1647,25 +1799,25 @@ Tensor convolutionOp(
   return result;
 }
 
-Tensor cosineOp(const Tensor &operand, ShapedType resultType) {
+Tensor cosineOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, cosine(operand.get(*it)));
   return result;
 }
 
-Tensor divideOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor divideOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, lhs.get(*it) / rhs.get(*it));
   return result;
 }
 
-Tensor dotGeneralOp(const Tensor &lhs, const Tensor &rhs,
-                    const Axes &lhsBatchingDimensions,
-                    const Axes &rhsBatchingDimensions,
-                    const Axes &lhsContractingDimensions,
-                    const Axes &rhsContractingDimensions,
+Tensor dotGeneralOp(const Tensor& lhs, const Tensor& rhs,
+                    const Axes& lhsBatchingDimensions,
+                    const Axes& rhsBatchingDimensions,
+                    const Axes& lhsContractingDimensions,
+                    const Axes& rhsContractingDimensions,
                     ShapedType resultType) {
   Tensor result(resultType);
   Axes lhsResultDims;
@@ -1737,8 +1889,8 @@ Tensor dotGeneralOp(const Tensor &lhs, const Tensor &rhs,
   return result;
 }
 
-Tensor dynamicSliceOp(const Tensor &operand, ArrayRef<Tensor> startIndices,
-                      const Sizes &sliceSizes, ShapedType resultType) {
+Tensor dynamicSliceOp(const Tensor& operand, ArrayRef<Tensor> startIndices,
+                      const Sizes& sliceSizes, ShapedType resultType) {
   Tensor result(resultType);
   auto adjustedStartIndices =
       clamp(0, evalIndex(startIndices), operand.getShape() - sliceSizes);
@@ -1751,7 +1903,7 @@ Tensor dynamicSliceOp(const Tensor &operand, ArrayRef<Tensor> startIndices,
   return result;
 }
 
-Tensor dynamicUpdateSliceOp(const Tensor &operand, const Tensor &update,
+Tensor dynamicUpdateSliceOp(const Tensor& operand, const Tensor& update,
                             ArrayRef<Tensor> startIndices,
                             ShapedType resultType) {
   Tensor result(resultType);
@@ -1769,21 +1921,21 @@ Tensor dynamicUpdateSliceOp(const Tensor &operand, const Tensor &update,
   return result;
 }
 
-Tensor expm1Op(const Tensor &operand, ShapedType resultType) {
+Tensor expm1Op(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, exponentialMinusOne(operand.get(*it)));
   return result;
 }
 
-Tensor exponentialOp(const Tensor &operand, ShapedType resultType) {
+Tensor exponentialOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, exponential(operand.get(*it)));
   return result;
 }
 
-Tensor __fft_1d(const Tensor &operand, ShapedType resultType,
+Tensor __fft_1d(const Tensor& operand, ShapedType resultType,
                 int64_t dimension) {
   Tensor result(resultType);
 
@@ -1793,7 +1945,7 @@ Tensor __fft_1d(const Tensor &operand, ShapedType resultType,
     auto N = operand.getShape()[dimension];
 
     Element X(resultType.getElementType(),
-              std::complex<APFloat>(APFloat(0.0), APFloat(0.0)));
+              mlir::Complex<APFloat>(APFloat(0.0), APFloat(0.0)));
 
     for (int n = 0; n < N; n++) {
       auto operandIndex = Index(resultIndex);
@@ -1811,7 +1963,7 @@ Tensor __fft_1d(const Tensor &operand, ShapedType resultType,
   return result;
 }
 
-Tensor conjugate(const Tensor &operand) {
+Tensor conjugate(const Tensor& operand) {
   auto complexType = cast<ComplexType>(operand.getElementType());
   auto floatType = complexType.getElementType();
   auto floatResultType = operand.getType().cloneWith(std::nullopt, floatType);
@@ -1820,8 +1972,8 @@ Tensor conjugate(const Tensor &operand) {
   return complexOp(real, negOp(imag, floatResultType), operand.getType());
 }
 
-Tensor fftOp(const Tensor &operand, const FftType fftType,
-             const ArrayRef<int64_t> &fftLength, ShapedType resultType) {
+Tensor fftOp(const Tensor& operand, const FftType fftType,
+             const ArrayRef<int64_t>& fftLength, ShapedType resultType) {
   auto fftRank = fftLength.size();
   auto nBatchDims = resultType.getRank() - fftRank;
   Axes fftDims(fftRank);
@@ -1837,7 +1989,7 @@ Tensor fftOp(const Tensor &operand, const FftType fftType,
     // compute IFFT as conjugation, FFT, conjugation and normalization
     Tensor result(operand);
     for (auto d = fftDims.begin(); d != fftDims.end(); ++d) {
-      auto divisorValue = std::complex<APFloat>(
+      auto divisorValue = mlir::Complex<APFloat>(
           APFloat(static_cast<double>(resultType.getDimSize(*d))),
           APFloat(0.0));
       auto divisor =
@@ -1864,9 +2016,9 @@ Tensor fftOp(const Tensor &operand, const FftType fftType,
     return result;
   } else if (fftType == FftType::IRFFT) {
     Tensor result(operand);
-    auto renormFactor = std::transform_reduce(
-        fftDims.begin(), fftDims.end(), 1, std::multiplies<int64_t>(),
-        [&](int64_t d) { return resultType.getDimSize(d); });
+    int64_t renormFactor = std::accumulate(
+        fftDims.begin(), fftDims.end(), static_cast<int64_t>(1),
+        [&](int64_t acc, int64_t d) { return acc * resultType.getDimSize(d); });
 
     // use FFT to compute the IFFT steps
     auto d_irfft = fftDims.pop_back_val();
@@ -1902,18 +2054,18 @@ Tensor fftOp(const Tensor &operand, const FftType fftType,
   }
 }
 
-Tensor floorOp(const Tensor &operand, ShapedType resultType) {
+Tensor floorOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, floor(operand.get(*it)));
   return result;
 }
 
-Tensor gatherOp(const Tensor &operand, const Tensor &startIndices,
-                const Axes &offsetDims, const Axes &collapsedSliceDims,
-                const Axes &operandBatchingDims,
-                const Axes &startIndicesBatchingDims, const Axes &startIndexMap,
-                Axis indexVectorDim, const Sizes &sliceSizes,
+Tensor gatherOp(const Tensor& operand, const Tensor& startIndices,
+                const Axes& offsetDims, const Axes& collapsedSliceDims,
+                const Axes& operandBatchingDims,
+                const Axes& startIndicesBatchingDims, const Axes& startIndexMap,
+                Axis indexVectorDim, const Sizes& sliceSizes,
                 bool indicesAreSorted, ShapedType resultType) {
   Tensor result(resultType);
   Axes batchDims;
@@ -1969,7 +2121,7 @@ Tensor gatherOp(const Tensor &operand, const Tensor &startIndices,
   return result;
 }
 
-Tensor getDimensionSizeOp(const Tensor &operand, Axis dimension,
+Tensor getDimensionSizeOp(const Tensor& operand, Axis dimension,
                           ShapedType resultType) {
   Tensor result(resultType);
   result.set(
@@ -1977,27 +2129,27 @@ Tensor getDimensionSizeOp(const Tensor &operand, Axis dimension,
   return result;
 }
 
-InterpreterValue getTupleElementOp(const Tuple &operand, int32_t index) {
+InterpreterValue getTupleElementOp(const Tuple& operand, int32_t index) {
   return operand.get(index);
 }
 
-SmallVector<InterpreterValue> ifOp(const Tensor &pred, Region &trueBranch,
-                                   Region &falseBranch, Process *process,
-                                   Scope &scope) {
+SmallVector<InterpreterValue> ifOp(const Tensor& pred, Region& trueBranch,
+                                   Region& falseBranch, Process* process,
+                                   Scope& scope) {
   return pred.get({}).getBooleanValue()
              ? eval(trueBranch, {}, /*fallback=*/nullptr, process, &scope)
              : eval(falseBranch, {}, /*fallback=*/nullptr, process, &scope);
 }
 
-Tensor imagOp(const Tensor &operand, ShapedType resultType) {
+Tensor imagOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, imag(operand.get(*it)));
   return result;
 }
 
-SmallVector<InterpreterValue> infeedOp(Token token, Process *process,
-                                       Region &region, Scope &scope) {
+SmallVector<InterpreterValue> infeedOp(Token token, Process* process,
+                                       Region& region, Scope& scope) {
   if (!process)
     llvm::report_fatal_error(
         "infeed is only supported when run via interpreter.run_parallel");
@@ -2019,36 +2171,36 @@ Tensor iotaOp(Axis iotaDimension, ShapedType resultType) {
   return result;
 }
 
-Tensor isFiniteOp(const Tensor &operand, ShapedType resultType) {
+Tensor isFiniteOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, isFinite(operand.get(*it)));
   return result;
 }
 
-Tensor log1pOp(const Tensor &operand, ShapedType resultType) {
+Tensor log1pOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, logPlusOne(operand.get(*it)));
   return result;
 }
 
-Tensor logOp(const Tensor &operand, ShapedType resultType) {
+Tensor logOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, log(operand.get(*it)));
   return result;
 }
 
-Tensor logisticOp(const Tensor &operand, ShapedType resultType) {
+Tensor logisticOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, logistic(operand.get(*it)));
   return result;
 }
 
-Tensor mapOp(ArrayRef<Tensor> inputs, Region &computation, Process *process,
-             Scope &scope, ShapedType resultType) {
+Tensor mapOp(ArrayRef<Tensor> inputs, Region& computation, Process* process,
+             Scope& scope, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it) {
     SmallVector<InterpreterValue> args;
@@ -2065,35 +2217,35 @@ Tensor mapOp(ArrayRef<Tensor> inputs, Region &computation, Process *process,
   return result;
 }
 
-Tensor maxOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor maxOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, max(lhs.get(*it), rhs.get(*it)));
   return result;
 }
 
-Tensor minOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor minOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, min(lhs.get(*it), rhs.get(*it)));
   return result;
 }
 
-Tensor multiplyOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor multiplyOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, lhs.get(*it) * rhs.get(*it));
   return result;
 }
 
-Tensor negOp(const Tensor &operand, ShapedType resultType) {
+Tensor negOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, -operand.get(*it));
   return result;
 }
 
-Tensor notOp(const Tensor &operand, ShapedType resultType) {
+Tensor notOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, ~operand.get(*it));
@@ -2105,14 +2257,14 @@ SmallVector<InterpreterValue> optimizationBarrierOp(
   return SmallVector<InterpreterValue>(operand);
 }
 
-Tensor orOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor orOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, lhs.get(*it) | rhs.get(*it));
   return result;
 }
 
-Token outfeedOp(ArrayRef<Tensor> inputs, Token token, Process *process) {
+Token outfeedOp(ArrayRef<Tensor> inputs, Token token, Process* process) {
   if (!process)
     llvm::report_fatal_error(
         "outfeed is only supported when run via interpreter.run_parallel");
@@ -2121,8 +2273,8 @@ Token outfeedOp(ArrayRef<Tensor> inputs, Token token, Process *process) {
   return token;
 }
 
-Tensor padOp(const Tensor &operand, const Tensor &paddingValue,
-             const Sizes &edgePaddingLow, const Sizes &interiorPadding,
+Tensor padOp(const Tensor& operand, const Tensor& paddingValue,
+             const Sizes& edgePaddingLow, const Sizes& interiorPadding,
              ShapedType resultType) {
   auto result = makeSplat(resultType, paddingValue.get({}));
   for (auto operandIt = operand.index_begin(); operandIt != operand.index_end();
@@ -2137,7 +2289,7 @@ Tensor padOp(const Tensor &operand, const Tensor &paddingValue,
   return result;
 }
 
-Tensor partitionIdOp(Process *process, MLIRContext *context) {
+Tensor partitionIdOp(Process* process, MLIRContext* context) {
   if (!process)
     llvm::report_fatal_error(
         "partition_id is only supported when run via interpreter.run_parallel");
@@ -2146,21 +2298,21 @@ Tensor partitionIdOp(Process *process, MLIRContext *context) {
   return constant(APInt(32, partitionId), elementType);
 }
 
-Tensor populationCountOp(const Tensor &operand, ShapedType resultType) {
+Tensor populationCountOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, popcnt(operand.get(*it)));
   return result;
 }
 
-Tensor powerOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor powerOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, power(lhs.get(*it), rhs.get(*it)));
   return result;
 }
 
-Tensor realOp(const Tensor &operand, ShapedType resultType) {
+Tensor realOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, real(operand.get(*it)));
@@ -2168,17 +2320,17 @@ Tensor realOp(const Tensor &operand, ShapedType resultType) {
 }
 
 SmallVector<InterpreterValue> recvOp(Token token, ChannelId channelId,
-                                     Process *process) {
+                                     Process* process) {
   SmallVector<InterpreterValue> results;
-  for (const auto &tensor : process->recv(channelId)) results.push_back(tensor);
+  for (const auto& tensor : process->recv(channelId)) results.push_back(tensor);
   results.push_back(token);
   return results;
 }
 
 SmallVector<Tensor> reduceOp(ArrayRef<Tensor> inputs,
                              ArrayRef<Tensor> initValues,
-                             const Axes &dimensions, Region &body,
-                             Process *process, Scope &scope,
+                             const Axes& dimensions, Region& body,
+                             Process* process, Scope& scope,
                              ArrayRef<ShapedType> resultTypes) {
   SmallVector<Tensor> results;
   for (auto [resultType, initValue] : llvm::zip(resultTypes, initValues))
@@ -2208,7 +2360,7 @@ SmallVector<Tensor> reduceOp(ArrayRef<Tensor> inputs,
   return results;
 }
 
-Tensor reducePrecisionOp(const Tensor &operand, int32_t exponentBits,
+Tensor reducePrecisionOp(const Tensor& operand, int32_t exponentBits,
                          int32_t mantissaBits, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
@@ -2217,10 +2369,10 @@ Tensor reducePrecisionOp(const Tensor &operand, int32_t exponentBits,
   return result;
 }
 
-Tensor reduceScatterOp(const Tensor &operand, int64_t scatterDimension,
+Tensor reduceScatterOp(const Tensor& operand, int64_t scatterDimension,
                        SmallVector<SmallVector<uint32_t>> replicaGroups,
                        ChannelId channelId, bool useGlobalDeviceIds,
-                       Region &region, Process *process, Scope &scope,
+                       Region& region, Process* process, Scope& scope,
                        ShapedType returnType) {
   if (!process)
     llvm::report_fatal_error(
@@ -2261,10 +2413,10 @@ Tensor reduceScatterOp(const Tensor &operand, int64_t scatterDimension,
 
 SmallVector<Tensor> reduceWindowOp(
     ArrayRef<Tensor> inputs, ArrayRef<Tensor> initValues,
-    const Sizes &windowDimensions, const Sizes &windowStrides,
-    const Sizes &baseDilations, const Sizes &windowDilations,
-    const Sizes &paddingLow, const Sizes &paddingHigh, Region &body,
-    Process *process, Scope &scope, ArrayRef<ShapedType> resultTypes) {
+    const Sizes& windowDimensions, const Sizes& windowStrides,
+    const Sizes& baseDilations, const Sizes& windowDilations,
+    const Sizes& paddingLow, const Sizes& paddingHigh, Region& body,
+    Process* process, Scope& scope, ArrayRef<ShapedType> resultTypes) {
   SmallVector<Tensor> results;
   for (auto [resultType, initValue] : llvm::zip(resultTypes, initValues))
     results.push_back(makeSplat(resultType, initValue.get({})));
@@ -2278,7 +2430,7 @@ SmallVector<Tensor> reduceWindowOp(
     SmallVector<Tensor> windows;
     auto windowStart = (*resultIt) * windowStrides;
     auto windowEnd = windowStart + (windowDimensions - 1) * windowDilations + 1;
-    for (const auto &paddedInput : paddedInputs)
+    for (const auto& paddedInput : paddedInputs)
       windows.push_back(
           sliceOp(paddedInput, windowStart, windowEnd, windowDilations));
 
@@ -2290,14 +2442,14 @@ SmallVector<Tensor> reduceWindowOp(
   return results;
 }
 
-Tensor remOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor remOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, rem(lhs.get(*it), rhs.get(*it)));
   return result;
 }
 
-Tensor replicaIdOp(Process *process, MLIRContext *context) {
+Tensor replicaIdOp(Process* process, MLIRContext* context) {
   if (!process)
     llvm::report_fatal_error(
         "replica_id is only supported when run via interpreter.run_parallel");
@@ -2306,7 +2458,7 @@ Tensor replicaIdOp(Process *process, MLIRContext *context) {
   return constant(APInt(32, replicaId), elementType);
 }
 
-Tensor reshapeOp(const Tensor &operand, ShapedType resultType) {
+Tensor reshapeOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto resultIt = result.index_begin(), operandIt = operand.index_begin();
        resultIt != result.index_end(); ++resultIt, ++operandIt) {
@@ -2317,7 +2469,7 @@ Tensor reshapeOp(const Tensor &operand, ShapedType resultType) {
   return result;
 }
 
-Tensor reverseOp(const Tensor &operand, const Axes &dimensions,
+Tensor reverseOp(const Tensor& operand, const Axes& dimensions,
                  ShapedType resultType) {
   Tensor result(resultType);
   for (auto resultIt = result.index_begin(); resultIt != result.index_end();
@@ -2331,21 +2483,21 @@ Tensor reverseOp(const Tensor &operand, const Axes &dimensions,
   return result;
 }
 
-Tensor roundNearestEvenOp(const Tensor &operand, ShapedType resultType) {
+Tensor roundNearestEvenOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, roundNearestEven(operand.get(*it)));
   return result;
 }
 
-Tensor roundOp(const Tensor &operand, ShapedType resultType) {
+Tensor roundOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, roundNearestAfz(operand.get(*it)));
   return result;
 }
 
-Tensor rsqrtOp(const Tensor &operand, ShapedType resultType) {
+Tensor rsqrtOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, rsqrt(operand.get(*it)));
@@ -2353,15 +2505,17 @@ Tensor rsqrtOp(const Tensor &operand, ShapedType resultType) {
 }
 
 SmallVector<Tensor> scatterOp(
-    ArrayRef<Tensor> inputs, const Tensor &scatterIndices,
-    ArrayRef<Tensor> updates, const Axes &updateWindowDims,
-    const Axes &insertedWindowDims, const Axes &inputBatchingDims,
-    const Axes &scatterIndicesBatchingDims,
-    const Axes &scatterDimsToOperandDims, Axis indexVectorDim,
-    Region &updateComputation, Process *process, Scope &scope,
+    ArrayRef<Tensor> inputs, const Tensor& scatterIndices,
+    ArrayRef<Tensor> updates, const Axes& updateWindowDims,
+    const Axes& insertedWindowDims, const Axes& inputBatchingDims,
+    const Axes& scatterIndicesBatchingDims,
+    const Axes& scatterDimsToOperandDims, Axis indexVectorDim,
+    Region& updateComputation, Process* process, Scope& scope,
     ArrayRef<ShapedType> resultTypes) {
-  SmallVector<Tensor> results;
-  for (const auto &input : inputs) results.push_back(input);
+  // Copy `inputs` to `results` using `clone()` to make sure that modifying
+  // `results` won't affect `inputs` because SSA values are immutable.
+  SmallVector<Tensor> results = llvm::map_to_vector(
+      inputs, [](const Tensor& input) { return input.clone(); });
 
   Axes updateScatterDims;
   for (auto d : updates[0].getAxes())
@@ -2413,9 +2567,9 @@ SmallVector<Tensor> scatterOp(
     if (!resultIndex.inBounds(results[0].getShape())) continue;
 
     SmallVector<InterpreterValue> updateComputationArgs;
-    for (const auto &result : results)
+    for (const auto& result : results)
       updateComputationArgs.push_back(constant(result.get(resultIndex)));
-    for (const auto &update : updates)
+    for (const auto& update : updates)
       updateComputationArgs.push_back(constant(update.get(updateIndex)));
 
     auto updatedValues = eval(updateComputation, updateComputationArgs,
@@ -2427,19 +2581,19 @@ SmallVector<Tensor> scatterOp(
   return results;
 }
 
-Tensor selectAndScatterOp(const Tensor &operand, const Tensor &source,
-                          const Tensor &initValue,
-                          const Sizes &windowDimensions,
-                          const Sizes &windowStrides, const Sizes &paddingLow,
-                          Region &select, Region &scatter, Process *process,
-                          Scope &scope, ShapedType resultType) {
+Tensor selectAndScatterOp(const Tensor& operand, const Tensor& source,
+                          const Tensor& initValue,
+                          const Sizes& windowDimensions,
+                          const Sizes& windowStrides, const Sizes& paddingLow,
+                          Region& select, Region& scatter, Process* process,
+                          Scope& scope, ShapedType resultType) {
   auto result = makeSplat(resultType, initValue.get({}));
 
   for (auto sourceIt = source.index_begin(); sourceIt != source.index_end();
        ++sourceIt) {
     std::optional<Element> selectedVal;
     std::optional<Index> selectedIndex;
-    auto iterateThroughWindow = [&](std::function<void(const Index &)> body) {
+    auto iterateThroughWindow = [&](std::function<void(const Index&)> body) {
       for (auto windowIt = windowDimensions.index_begin();
            windowIt != windowDimensions.index_end(); ++windowIt) {
         auto operandIndex = *sourceIt * windowStrides + *windowIt - paddingLow;
@@ -2447,7 +2601,7 @@ Tensor selectAndScatterOp(const Tensor &operand, const Tensor &source,
         body(operandIndex);
       }
     };
-    iterateThroughWindow([&](const Index &operandIndex) {
+    iterateThroughWindow([&](const Index& operandIndex) {
       auto currVal = operand.get(operandIndex);
       if (!selectedVal) {
         selectedVal = currVal;
@@ -2466,7 +2620,7 @@ Tensor selectAndScatterOp(const Tensor &operand, const Tensor &source,
         selectedIndex = operandIndex;
       }
     });
-    iterateThroughWindow([&](const Index &operandIndex) {
+    iterateThroughWindow([&](const Index& operandIndex) {
       if (operandIndex == selectedIndex) {
         Tensor sourceValues(
             RankedTensorType::get({2}, initValue.getElementType()));
@@ -2481,7 +2635,7 @@ Tensor selectAndScatterOp(const Tensor &operand, const Tensor &source,
   return result;
 }
 
-Tensor selectOp(const Tensor &pred, const Tensor &onTrue, const Tensor &onFalse,
+Tensor selectOp(const Tensor& pred, const Tensor& onTrue, const Tensor& onFalse,
                 ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it) {
@@ -2493,12 +2647,12 @@ Tensor selectOp(const Tensor &pred, const Tensor &onTrue, const Tensor &onFalse,
 }
 
 Token sendOp(ArrayRef<Tensor> inputs, Token token, ChannelId channelId,
-             Process *process) {
+             Process* process) {
   process->send(inputs, channelId);
   return token;
 }
 
-Tensor shiftLeftOp(const Tensor &lhs, const Tensor &rhs,
+Tensor shiftLeftOp(const Tensor& lhs, const Tensor& rhs,
                    ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
@@ -2506,7 +2660,7 @@ Tensor shiftLeftOp(const Tensor &lhs, const Tensor &rhs,
   return result;
 }
 
-Tensor shiftRightArithmeticOp(const Tensor &lhs, const Tensor &rhs,
+Tensor shiftRightArithmeticOp(const Tensor& lhs, const Tensor& rhs,
                               ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
@@ -2514,7 +2668,7 @@ Tensor shiftRightArithmeticOp(const Tensor &lhs, const Tensor &rhs,
   return result;
 }
 
-Tensor shiftRightLogicalOp(const Tensor &lhs, const Tensor &rhs,
+Tensor shiftRightLogicalOp(const Tensor& lhs, const Tensor& rhs,
                            ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
@@ -2522,22 +2676,22 @@ Tensor shiftRightLogicalOp(const Tensor &lhs, const Tensor &rhs,
   return result;
 }
 
-Tensor signOp(const Tensor &operand, ShapedType resultType) {
+Tensor signOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, sign(operand.get(*it)));
   return result;
 }
 
-Tensor sineOp(const Tensor &operand, ShapedType resultType) {
+Tensor sineOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, sine(operand.get(*it)));
   return result;
 }
 
-Tensor sliceOp(const Tensor &operand, const Sizes &startIndices,
-               const Sizes &strides, ShapedType resultType) {
+Tensor sliceOp(const Tensor& operand, const Sizes& startIndices,
+               const Sizes& strides, ShapedType resultType) {
   Tensor result(resultType);
   for (auto resultIt = result.index_begin(); resultIt != result.index_end();
        ++resultIt) {
@@ -2549,10 +2703,10 @@ Tensor sliceOp(const Tensor &operand, const Sizes &startIndices,
 }
 
 SmallVector<Tensor> sortOp(ArrayRef<Tensor> inputs, Axis dimension,
-                           bool isStable, Region &comparator, Process *process,
-                           Scope &scope) {
+                           bool isStable, Region& comparator, Process* process,
+                           Scope& scope) {
   SmallVector<Tensor> results;
-  for (const auto &input : inputs) results.emplace_back(input.getType());
+  for (const auto& input : inputs) results.emplace_back(input.getType());
   auto adjustedDimension =
       dimension >= 0 ? dimension : dimension + inputs[0].getRank();
 
@@ -2579,7 +2733,7 @@ SmallVector<Tensor> sortOp(ArrayRef<Tensor> inputs, Axis dimension,
       auto rhsIndex = *resultIt;
       lhsIndex[adjustedDimension] = lhsHandle;
       rhsIndex[adjustedDimension] = rhsHandle;
-      for (const auto &input : inputs) {
+      for (const auto& input : inputs) {
         args.emplace_back(constant(input.get(lhsIndex)));
         args.emplace_back(constant(input.get(rhsIndex)));
       }
@@ -2609,35 +2763,35 @@ SmallVector<Tensor> sortOp(ArrayRef<Tensor> inputs, Axis dimension,
   return results;
 }
 
-Tensor sqrtOp(const Tensor &operand, ShapedType resultType) {
+Tensor sqrtOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, sqrt(operand.get(*it)));
   return result;
 }
 
-Tensor subtractOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor subtractOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, lhs.get(*it) - rhs.get(*it));
   return result;
 }
 
-Tensor tanOp(const Tensor &operand, ShapedType resultType) {
+Tensor tanOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, tan(operand.get(*it)));
   return result;
 }
 
-Tensor tanhOp(const Tensor &operand, ShapedType resultType) {
+Tensor tanhOp(const Tensor& operand, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, tanh(operand.get(*it)));
   return result;
 }
 
-Tensor transposeOp(const Tensor &operand, const Axes &permutation,
+Tensor transposeOp(const Tensor& operand, const Axes& permutation,
                    ShapedType resultType) {
   Tensor result(resultType);
   for (auto operandIt = operand.index_begin(); operandIt != operand.index_end();
@@ -2651,14 +2805,105 @@ Tensor transposeOp(const Tensor &operand, const Axes &permutation,
   return result;
 }
 
+Tensor triangularSolveOp(const Tensor& A, const Tensor& b, bool leftSide,
+                         bool lower, bool unitDiagonal, Transpose transposeA,
+                         ShapedType resultType) {
+  Tensor result(resultType);
+  Tensor tA(A);
+
+  if (transposeA == Transpose::TRANSPOSE || transposeA == Transpose::ADJOINT) {
+    auto permutation = A.getAxes();
+    auto rank = A.getRank();
+    auto tmp = permutation[rank - 1];
+    permutation[rank - 1] = permutation[rank - 2];
+    permutation[rank - 2] = tmp;
+    tA = transposeOp(A, permutation, A.getType());
+    lower = !lower;
+  }
+
+  if (transposeA == Transpose::ADJOINT) tA = conjugate(tA);
+
+  const auto rank = A.getRank();
+  const auto N = A.getShape()[A.getRank() - 1];
+  const int64_t dim_i = leftSide ? rank - 2 : rank - 1;
+  const int64_t dim_k = leftSide ? rank - 1 : rank - 2;
+  const auto dim_j = dim_k;
+  const int64_t size_k = b.getShape()[dim_k];
+
+  auto i_init = [&]() { return leftSide ^ lower ? N - 1 : 0; };
+  auto i_predicate = [&](int64_t i) {
+    return leftSide ^ lower ? i >= 0 : i < N;
+  };
+  auto i_update = [&](int64_t& i) { leftSide ^ lower ? i-- : i++; };
+
+  auto j_init = [&](int64_t i) { return leftSide ^ lower ? N - 1 : 0; };
+  auto j_predicate = [&](int64_t j, int64_t i) {
+    return leftSide ^ lower ? j > i : j < i;
+  };
+  auto j_update = [&](int64_t& j) { leftSide ^ lower ? j-- : j++; };
+
+  auto result_index = [&](Index batchIndex, int64_t i, int64_t k) {
+    Index index(rank);
+    for (size_t d = 0; d < batchIndex.size(); d++) index[d] = batchIndex[d];
+
+    index[dim_k] = k;
+    index[dim_i] = i;
+    return index;
+  };
+
+  auto a_index = [&](Index batchIndex, int64_t i, int64_t j) {
+    Index index(rank);
+    for (size_t d = 0; d < batchIndex.size(); d++) index[d] = batchIndex[d];
+
+    index[dim_i] = i;
+    index[dim_j] = j;
+    return index;
+  };
+
+  Sizes batchShape(rank - 2);
+  if (rank > 2) {
+    for (size_t d = 0; d < (size_t)(rank - 2); d++)
+      batchShape[d] = result.getShape()[d];
+  }
+
+  for (auto batchIndexIt = batchShape.index_begin();
+       batchIndexIt != batchShape.index_end(); ++batchIndexIt) {
+    auto batchIndex = *batchIndexIt;
+
+    for (int64_t k = 0; k < size_k; k++) {
+      for (int64_t i = i_init(); i_predicate(i); i_update(i)) {
+        auto index = result_index(batchIndex, i, k);
+
+        Element x = b.get(index);
+
+        // left_side xor lower: j in [0, i)
+        // otherwise:  j in (i, N-1]
+        for (int64_t j = j_init(i); j_predicate(j, i); j_update(j)) {
+          auto a = tA.get(a_index(batchIndex, i, j));
+          auto xj = result.get(result_index(batchIndex, j, k));
+          x = x - a * xj;
+        }
+        if (!unitDiagonal) {
+          auto a = tA.get(Index{i, i});
+          x = x / a;
+        }
+
+        result.set(index, x);
+      }
+    }
+  }
+
+  return result;
+}
+
 Tuple tupleOp(ArrayRef<InterpreterValue> val, TupleType resultType) {
   return Tuple(val, resultType);
 }
 
 SmallVector<InterpreterValue> whileOp(SmallVector<InterpreterValue> operand,
-                                      Region &cond, Region &body,
-                                      InterpreterFallback *fallback,
-                                      Process *process, Scope &scope) {
+                                      Region& cond, Region& body,
+                                      InterpreterFallback* fallback,
+                                      Process* process, Scope& scope) {
   SmallVector<InterpreterValue> results(operand);
 
   auto condResults = eval(cond, operand, fallback, process, &scope);
@@ -2671,7 +2916,7 @@ SmallVector<InterpreterValue> whileOp(SmallVector<InterpreterValue> operand,
   return results;
 }
 
-Tensor xorOp(const Tensor &lhs, const Tensor &rhs, ShapedType resultType) {
+Tensor xorOp(const Tensor& lhs, const Tensor& rhs, ShapedType resultType) {
   Tensor result(resultType);
   for (auto it = result.index_begin(); it != result.index_end(); ++it)
     result.set(*it, lhs.get(*it) ^ rhs.get(*it));

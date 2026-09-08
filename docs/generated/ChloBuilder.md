@@ -364,6 +364,15 @@ operation.
 MlirOp Lgamma(MlirOp &operand);
 ```
 
+### `chlo::MulhiOp`
+
+Creates a new [`chlo.mulhi`](https://openxla.org/stablehlo/generated/chlo#chlomulhi_chlomulhiop)
+operation.
+
+```c++
+MlirOp Mulhi(MlirOp &lhs, MlirOp &rhs);
+```
+
 ### `chlo::NextAfterOp`
 
 Creates a new [`chlo.next_after`](https://openxla.org/stablehlo/generated/chlo#chlonext_after_chlonext_afterop)
@@ -424,7 +433,7 @@ Creates a new [`chlo.top_k`](https://openxla.org/stablehlo/generated/chlo#chloto
 operation.
 
 ```c++
-SmallVector<MlirOp, 2> TopK(MlirOp &operand, uint64_t k);
+SmallVector<MlirOp, 2> TopK(MlirOp &operand, uint64_t k, /*optional*/bool is_stable = true);
 ```
 
 ### `chlo::ZetaOp`

@@ -1807,7 +1807,8 @@ func.func @real_dynamic_slice(%arg0: tensor<?xf32>, %arg1: tensor<1xindex>, %arg
 // CHECK-LABEL: func @dot_bounds
 func.func @dot_bounds(%arg0: tensor<?x12xf32, #stablehlo.bounds<64, ?>>, %arg1: tensor<12x?xf32, #stablehlo.bounds<?, 64>>) -> tensor<?x?xf32, #stablehlo.bounds<64, 64>> {
   %0 = stablehlo.dot %arg0, %arg1, precision = [HIGHEST, HIGHEST] : (tensor<?x12xf32, #stablehlo.bounds<64, ?>>, tensor<12x?xf32, #stablehlo.bounds<?, 64>>) -> tensor<?x?xf32, #stablehlo.bounds<64, 64>>
-  // CHECK: return {{.*}} : tensor<?x?xf32, #stablehlo.bounds<64, 64>>
+  // CHECK: types0 = tensor<?x?xindex, #stablehlo.bounds<64, 64>>
+  %1 = "hlo_test_infer.get_return_type_components"(%0): (tensor<?x?xf32, #stablehlo.bounds<64, 64>>) -> tensor<2xindex>
   return %0 : tensor<?x?xf32, #stablehlo.bounds<64, 64>>
 }
 
@@ -1833,6 +1834,26 @@ func.func @dot_general_c12(%arg0: tensor<?x?x?xf32>, %arg1: tensor<?x?x?xf32>) -
   } : (tensor<?x?x?xf32>, tensor<?x?x?xf32>) -> tensor<?x?x?xf32>
   %1 = "hlo_test_infer.reify_return_type_shapes"(%result): (tensor<?x?x?xf32>) -> tensor<3xindex>
   func.return %1: tensor<3xindex>
+}
+
+// -----
+
+// CHECK-LABEL: func @dot_general_bounds
+func.func @dot_general_bounds(%arg0: tensor<?x12xf32, #stablehlo.bounds<64, ?>>, %arg1: tensor<12x?xf32, #stablehlo.bounds<?, 64>>) -> tensor<?x?xf32, #stablehlo.bounds<64, 64>> {
+  %0 = stablehlo.dot_general %arg0, %arg1, contracting_dims = [1] x [0], precision = [HIGHEST, HIGHEST] : (tensor<?x12xf32, #stablehlo.bounds<64, ?>>, tensor<12x?xf32, #stablehlo.bounds<?, 64>>) -> tensor<?x?xf32, #stablehlo.bounds<64, 64>>
+  // CHECK: types0 = tensor<?x?xindex, #stablehlo.bounds<64, 64>>
+  %1 = "hlo_test_infer.get_return_type_components"(%0): (tensor<?x?xf32, #stablehlo.bounds<64, 64>>) -> tensor<2xindex>
+  return %0 : tensor<?x?xf32, #stablehlo.bounds<64, 64>>
+}
+
+// -----
+
+// CHECK-LABEL: func @dot_general_bounds_another
+func.func @dot_general_bounds_another(%arg0: tensor<10x?x12xf32, #stablehlo.bounds<?, 64, ?>>, %arg1: tensor<10x12x?xf32, #stablehlo.bounds<?, ?, 64>>) -> tensor<3xindex> {
+  %0 = stablehlo.dot_general %arg0, %arg1, batching_dims = [0] x [0], contracting_dims = [2] x [1] : (tensor<10x?x12xf32, #stablehlo.bounds<?, 64, ?>>, tensor<10x12x?xf32, #stablehlo.bounds<?, ?, 64>>) -> tensor<10x?x?xf32, #stablehlo.bounds<?, 64, 64>>
+  // CHECK: types0 = tensor<10x?x?xindex, #stablehlo.bounds<?, 64, 64>>
+  %1 = "hlo_test_infer.get_return_type_components"(%0): (tensor<10x?x?xf32, #stablehlo.bounds<?, 64, 64>>) -> tensor<3xindex>
+  func.return %1 : tensor<3xindex>
 }
 
 // -----
@@ -2054,4 +2075,16 @@ func.func @reverse(%a : tensor<?x?x?x?xf32>) -> tensor<4xindex> {
   // CHECK: %[[SHAPE:.*]] = shape.shape_of %[[A]] : tensor<?x?x?x?xf32> -> tensor<4xindex>
   %1 = "hlo_test_infer.reify_return_type_shapes"(%0) : (tensor<?x?x?x?xf32>) -> tensor<4xindex>
   func.return %1 : tensor<4xindex>
+}
+
+// CHECK-LABEL: @concat_bounds_mixed_static_first
+func.func @concat_bounds_mixed_static_first(
+  %arg0: tensor<5x2xi32>,
+  %arg1: tensor<5x?xi32, #stablehlo.bounds<?, 4>>)  -> tensor<?x?xindex> {
+  %result = "stablehlo.concatenate"(%arg0, %arg1) { dimension = 1 : i64 } : (
+    tensor<5x2xi32>,
+    tensor<5x?xi32, #stablehlo.bounds<?, 4>>) -> tensor<?x?xi32>
+  // CHECK: types0 = tensor<5x?xi32, #stablehlo.bounds<?, 6>>
+  %1 = "hlo_test_infer.get_return_types"(%result) : (tensor<?x?xi32>) -> tensor<?x?xindex>
+  func.return %1 : tensor<?x?xindex>
 }

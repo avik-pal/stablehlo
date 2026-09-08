@@ -1,7 +1,7 @@
 // RUN: stablehlo-opt %s | FileCheck %s
 // RUN: stablehlo-opt -emit-bytecode %s | stablehlo-opt | FileCheck %s
-// RUN: stablehlo-opt -emit-bytecode -debug-only=chlo-bytecode %s 2>&1 | FileCheck --check-prefix=CHECK-WARN %s
-// RUN: stablehlo-opt -emit-bytecode %s | stablehlo-opt -debug-only=chlo-bytecode 2>&1 | FileCheck --check-prefix=CHECK-WARN %s
+// RUN: %if asserts %{ stablehlo-opt -emit-bytecode -debug-only=chlo-bytecode %s 2>&1 | FileCheck --check-prefix=CHECK-WARN %s %}
+// RUN: %if asserts %{ stablehlo-opt -emit-bytecode %s | stablehlo-opt -debug-only=chlo-bytecode 2>&1 | FileCheck --check-prefix=CHECK-WARN %s %}
 
 // CHECK-WARN-NOT: Not Implemented
 

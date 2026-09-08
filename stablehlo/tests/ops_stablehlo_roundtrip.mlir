@@ -2,8 +2,8 @@
 // RUN: stablehlo-opt %s > %t.0
 // RUN: stablehlo-opt -emit-bytecode %s | stablehlo-opt > %t.1
 // RUN: diff %t.0 %t.1
-// RUN: stablehlo-opt -emit-bytecode -debug-only=stablehlo-bytecode %s 2>&1 | FileCheck --check-prefix=CHECK-WARN %s
-// RUN: stablehlo-opt -emit-bytecode %s | stablehlo-opt -debug-only=stablehlo-bytecode 2>&1 | FileCheck --check-prefix=CHECK-WARN %s
+// RUN: %if asserts %{ stablehlo-opt -emit-bytecode -debug-only=stablehlo-bytecode %s 2>&1 | FileCheck --check-prefix=CHECK-WARN %s %}
+// RUN: %if asserts %{ stablehlo-opt -emit-bytecode %s | stablehlo-opt -debug-only=stablehlo-bytecode 2>&1 | FileCheck --check-prefix=CHECK-WARN %s %}
 
 // CHECK-WARN-NOT: Not Implemented
 
@@ -182,7 +182,7 @@ func.func @test_constants() {
   %cst_3 = arith.constant dense<[1, 2, 3, 4]> : tensor<4xi32>
   %cst_4 = arith.constant dense<[[1, 2], [3, 4]]> : tensor<2x2xi32>
   %cst_5 = arith.constant dense<[[3, 2], [1, 4]]> : tensor<2x2xi32>
-  %cst_6 = arith.constant dense<[[1, 2], [4, 8]]> : tensor<2x2xui32>
+  %cst_6 = stablehlo.constant dense<[[1, 2], [4, 8]]> : tensor<2x2xui32>
   %cst_18 = arith.constant dense<[1.0, 2.0, 3.0, 4.0]> : tensor<4xf4E2M1FN>
   %cst_19 = arith.constant dense<[1.0, 2.0, 3.0, 4.0]> : tensor<4xf6E2M3FN>
   %cst_20 = arith.constant dense<[1.0, 2.0, 3.0, 4.0]> : tensor<4xf6E3M2FN>
@@ -790,6 +790,95 @@ func.func @test_unary_round_nearest_even(%arg0: tensor<2xf32>) -> tensor<2xf32> 
 func.func @test_xor(%arg0: tensor<4xi1>, %arg1: tensor<4xi1>) -> tensor<4xi1> {
       %0 = stablehlo.xor %arg0, %arg1 : tensor<4xi1>
     func.return %0 : tensor<4xi1>
+}
+
+func.func @async_start_all_reduce(%arg0: tensor<4x4xf32>) -> !stablehlo.future<tensor<4x4xf32>> {
+  %0 = "stablehlo.async_start"(%arg0) ({
+    ^bb0(%barg0: tensor<4x4xf32>):
+    %1 = "stablehlo.all_reduce"(%barg0) ({
+    ^bb0(%arg2: tensor<f32>, %arg3: tensor<f32>):
+      %2 = "stablehlo.add"(%arg2, %arg3) : (tensor<f32>, tensor<f32>) -> tensor<f32>
+      "stablehlo.return"(%2) : (tensor<f32>) -> ()
+    }) {replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>} : (tensor<4x4xf32>) -> tensor<4x4xf32>
+    "stablehlo.return"(%1) : (tensor<4x4xf32>) -> ()
+  }) : (tensor<4x4xf32>) -> !stablehlo.future<tensor<4x4xf32>>
+  func.return %0: !stablehlo.future<tensor<4x4xf32>>
+}
+
+func.func @async_start_all_gather(%arg0: tensor<8x2xf32>) -> !stablehlo.future<tensor<8x8xf32>> {
+  %0 = "stablehlo.async_start"(%arg0) ({
+    ^bb0(%barg0: tensor<8x2xf32>):
+    %1 = "stablehlo.all_gather"(%barg0) {
+      all_gather_dim = 1 : i64,
+      replica_groups = dense<[[0, 2, 4, 6], [1, 3, 5, 7]]> : tensor<2x4xi64>
+    } : (tensor<8x2xf32>) -> tensor<8x8xf32>
+    "stablehlo.return"(%1) : (tensor<8x8xf32>) -> ()
+  }) : (tensor<8x2xf32>) -> !stablehlo.future<tensor<8x8xf32>>
+  func.return %0: !stablehlo.future<tensor<8x8xf32>>
+}
+
+func.func @async_start_all_to_all(%arg0: tensor<4x16xf32>) -> !stablehlo.future<tensor<16x4xf32>> {
+  %0 = "stablehlo.async_start"(%arg0) ({
+    ^bb0(%barg0: tensor<4x16xf32>):
+    %1 = "stablehlo.all_to_all"(%barg0) {
+      split_dimension = 1 : i64,
+      concat_dimension = 0 : i64,
+      split_count = 4 : i64,
+      replica_groups = dense<[[0, 1, 2, 3]]> : tensor<1x4xi64>
+    } : (tensor<4x16xf32>) -> tensor<16x4xf32>
+    "stablehlo.return"(%1) : (tensor<16x4xf32>) -> ()
+  }) : (tensor<4x16xf32>) -> !stablehlo.future<tensor<16x4xf32>>
+  func.return %0: !stablehlo.future<tensor<16x4xf32>>
+}
+
+func.func @async_start_collective_permute(%arg0: tensor<128x32xf32>) -> !stablehlo.future<tensor<128x32xf32>> {
+  %0 = "stablehlo.async_start"(%arg0) ({
+    ^bb0(%barg0: tensor<128x32xf32>):
+    %1 = "stablehlo.collective_permute"(%barg0) {
+      source_target_pairs = dense<[[0, 1], [1, 2], [2, 3]]> : tensor<3x2xi64>
+    } : (tensor<128x32xf32>) -> tensor<128x32xf32>
+    "stablehlo.return"(%1) : (tensor<128x32xf32>) -> ()
+  }) : (tensor<128x32xf32>) -> !stablehlo.future<tensor<128x32xf32>>
+  func.return %0: !stablehlo.future<tensor<128x32xf32>>
+}
+
+func.func @async_start_collective_broadcast(%arg0: tensor<16x8xf32>) -> !stablehlo.future<tensor<16x8xf32>> {
+  %0 = "stablehlo.async_start"(%arg0) ({
+    ^bb0(%barg0: tensor<16x8xf32>):
+    %1 = "stablehlo.collective_broadcast"(%barg0) {
+      replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>
+    } : (tensor<16x8xf32>) -> tensor<16x8xf32>
+    "stablehlo.return"(%1) : (tensor<16x8xf32>) -> ()
+  }) : (tensor<16x8xf32>) -> !stablehlo.future<tensor<16x8xf32>>
+  func.return %0: !stablehlo.future<tensor<16x8xf32>>
+}
+
+func.func @async_start_reduce_scatter(%arg0: tensor<4x16xf32>) -> !stablehlo.future<tensor<4x4xf32>> {
+  %0 = "stablehlo.async_start"(%arg0) ({
+    ^bb0(%barg0: tensor<4x16xf32>):
+    %1 = "stablehlo.reduce_scatter"(%barg0) ({
+      ^bb0(%arg2: tensor<f32>, %arg3: tensor<f32>):
+      %2 = stablehlo.add %arg2, %arg3 : tensor<f32>
+      "stablehlo.return"(%2) : (tensor<f32>) -> ()
+    }) {replica_groups = dense<[[0, 1, 2, 3]]> : tensor<1x4xi64>,
+        scatter_dimension = 1 : i64} : (tensor<4x16xf32>) -> tensor<4x4xf32>
+    "stablehlo.return"(%1) : (tensor<4x4xf32>) -> ()
+  }) : (tensor<4x16xf32>) -> !stablehlo.future<tensor<4x4xf32>>
+  func.return %0: !stablehlo.future<tensor<4x4xf32>>
+}
+
+func.func @async_done(%arg0: tensor<4x4xf32>) -> tensor<4x4xf32> {
+  %0 = "stablehlo.async_start"(%arg0) ({
+    ^bb0(%barg0: tensor<4x4xf32>):
+    %1 = "stablehlo.all_reduce"(%barg0) ({
+    ^bb0(%arg2: tensor<f32>, %arg3: tensor<f32>):
+      %2 = "stablehlo.add"(%arg2, %arg3) : (tensor<f32>, tensor<f32>) -> tensor<f32>
+      "stablehlo.return"(%2) : (tensor<f32>) -> ()
+    }) {replica_groups = dense<[[0, 1]]> : tensor<1x2xi64>} : (tensor<4x4xf32>) -> tensor<4x4xf32>
+    "stablehlo.return"(%1) : (tensor<4x4xf32>) -> ()
+  }) : (tensor<4x4xf32>) -> !stablehlo.future<tensor<4x4xf32>>
+  %1 = "stablehlo.async_done"(%0) : (!stablehlo.future<tensor<4x4xf32>>) -> tensor<4x4xf32>
+  func.return %1: tensor<4x4xf32>
 }
 
 // Attribute Tests:
